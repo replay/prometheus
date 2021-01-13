@@ -1608,15 +1608,40 @@ func (h *headIndexReader) SortedLabelValues(name string) ([]string, error) {
 
 // LabelValues returns label values present in the head for the
 // specific label name that are within the time range mint to maxt.
-func (h *headIndexReader) LabelValues(name string) ([]string, error) {
+func (h *headIndexReader) LabelValues(name string, ms ...*labels.Matcher) ([]string, error) {
 	h.head.symMtx.RLock()
 	defer h.head.symMtx.RUnlock()
 	if h.maxt < h.head.MinTime() || h.mint > h.head.MaxTime() {
 		return []string{}, nil
 	}
 
-	values := h.head.postings.LabelValues(name)
-	return values, nil
+	if len(ms) == 0 {
+		return h.head.postings.LabelValues(name), nil
+	}
+
+	var results []string
+VALUES:
+	for _, value := range h.head.postings.LabelValues(name) {
+		postings := h.head.postings.Get(name, value)
+	POSTINGS:
+		for {
+			if !postings.Next() {
+				break
+			}
+
+			memSeries := h.head.series.getByID(postings.At())
+			for _, matcher := range ms {
+				if !matcher.Matches(memSeries.lset.Get(matcher.Name)) {
+					continue POSTINGS
+				}
+			}
+
+			results = append(results, value)
+			continue VALUES
+		}
+	}
+
+	return results, nil
 }
 
 // LabelNames returns all the unique label names present in the head
