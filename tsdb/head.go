@@ -1619,7 +1619,6 @@ func (h *headIndexReader) LabelValues(name string, ms ...*labels.Matcher) ([]str
 		return h.head.postings.LabelValues(name), nil
 	}
 
-	resultsAdded := make(map[string]struct{})
 	var results []string
 VALUES:
 	for _, value := range h.head.postings.LabelValues(name) {
@@ -1637,7 +1636,6 @@ VALUES:
 				}
 			}
 
-			resultsAdded[value] = struct{}{}
 			results = append(results, value)
 			continue VALUES
 		}
