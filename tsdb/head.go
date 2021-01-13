@@ -1619,29 +1619,28 @@ func (h *headIndexReader) LabelValues(name string, ms ...*labels.Matcher) ([]str
 		return h.head.postings.LabelValues(name), nil
 	}
 
-	postings, err := PostingsForMatchers(h, ms...)
-	if err != nil {
-		return nil, err
-	}
-
+	resultsAdded := make(map[string]struct{})
 	var results []string
-	seen := make(map[string]struct{})
-	for {
-		if !postings.Next() {
-			return results, nil
-		}
+VALUES:
+	for _, value := range h.head.postings.LabelValues(name) {
+		postings := h.head.postings.Get(name, value)
+	POSTINGS:
+		for {
+			if !postings.Next() {
+				break
+			}
 
-		result := h.head.postings.LabelValueOfPosting(name, postings.At())
-		if result == "" {
-			continue
-		}
+			memSeries := h.head.series.getByID(postings.At())
+			for _, matcher := range ms {
+				if !matcher.Matches(memSeries.lset.Get(matcher.Name)) {
+					continue POSTINGS
+				}
+			}
 
-		if _, ok := seen[result]; ok {
-			continue
+			resultsAdded[value] = struct{}{}
+			results = append(results, value)
+			continue VALUES
 		}
-
-		seen[result] = struct{}{}
-		results = append(results, result)
 	}
 
 	return results, nil

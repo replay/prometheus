@@ -1912,6 +1912,7 @@ func TestHeadLabelValuesWithMatchers(t *testing.T) {
 			headIdxReader := head.indexRange(0, 200)
 			labelValues, err := headIdxReader.LabelValues(tt.labelName, tt.matchers...)
 			require.NoError(t, err)
+			sort.Strings(labelValues)
 			require.Equal(t, tt.expectedValues, labelValues)
 		})
 	}

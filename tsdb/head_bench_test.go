@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"sort"
 	"strconv"
 	"testing"
 
@@ -99,6 +100,7 @@ func BenchmarkHeadLabelValuesWithMatchers(b *testing.B) {
 
 	headIdxReader := head.indexRange(0, 200)
 	expectedValues := []string{"value1", "value2", "value3", "value4", "value5", "value6", "value7", "value8", "value9"}
+	sort.Strings(expectedValues)
 
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -106,6 +108,8 @@ func BenchmarkHeadLabelValuesWithMatchers(b *testing.B) {
 	for benchIdx := 0; benchIdx < b.N; benchIdx++ {
 		labelValues, err := headIdxReader.LabelValues("label1", labels.MustNewMatcher(labels.MatchEqual, "label2", "value1"))
 		require.NoError(b, err)
+
+		sort.Strings(labelValues)
 		require.Equal(b, expectedValues, labelValues)
 	}
 }
