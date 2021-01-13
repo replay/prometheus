@@ -1454,7 +1454,7 @@ func (r *Reader) SortedLabelValues(name string) ([]string, error) {
 // LabelValues returns value tuples that exist for the given label name.
 // It is not safe to use the return value beyond the lifetime of the byte slice
 // passed into the Reader.
-func (r *Reader) LabelValues(name string) ([]string, error) {
+func (r *Reader) LabelValues(name string, matchers ...*labels.Matcher) ([]string, error) {
 	if r.version == FormatV1 {
 		e, ok := r.postingsV1[name]
 		if !ok {

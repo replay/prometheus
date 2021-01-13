@@ -109,6 +109,21 @@ func (p *MemPostings) LabelValues(name string) []string {
 	return values
 }
 
+func (p *MemPostings) LabelValueOfPosting(name string, posting uint64) string {
+	p.mtx.RLock()
+	defer p.mtx.RUnlock()
+
+	for v, postings := range p.m[name] {
+		for postingIdx := range postings {
+			if postings[postingIdx] == posting {
+				return v
+			}
+		}
+	}
+
+	return ""
+}
+
 // PostingsStats contains cardinality based statistics for postings.
 type PostingsStats struct {
 	CardinalityMetricsStats []Stat
