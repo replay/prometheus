@@ -1625,6 +1625,7 @@ func (h *headIndexReader) LabelValues(name string, ms ...*labels.Matcher) ([]str
 	}
 
 	var results []string
+	seen := make(map[string]struct{})
 	for {
 		if !postings.Next() {
 			return results, nil
@@ -1635,6 +1636,11 @@ func (h *headIndexReader) LabelValues(name string, ms ...*labels.Matcher) ([]str
 			continue
 		}
 
+		if _, ok := seen[result]; ok {
+			continue
+		}
+
+		seen[result] = struct{}{}
 		results = append(results, result)
 	}
 
