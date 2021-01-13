@@ -81,6 +81,7 @@ func BenchmarkHeadLabelValuesWithMatchers(b *testing.B) {
 	// the last 10% of the metrics which we add will have the label & value "label2=value2".
 	// This means the metrics where "label2=value1" will have the values "value1"-"value9" for label "label1",
 	// but they won't have "label10".
+	// Each metric will also get a unique value in "label3".
 	for metricIdx := 0; metricIdx < metricCount; metricIdx++ {
 		var label1Value, label2Value, label3Value string
 		label3Value = fmt.Sprintf("value%d", metricIdx)

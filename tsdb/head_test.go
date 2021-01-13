@@ -1870,9 +1870,11 @@ func TestHeadLabelValuesWithMatchers(t *testing.T) {
 	}()
 
 	app := head.Appender(context.Background())
-	_, err := app.Add(labels.Labels{{Name: "label1", Value: "value1"}, {Name: "label2", Value: "value1"}}, 100, 0)
+	_, err := app.Add(labels.Labels{{Name: "label1", Value: "value1"}, {Name: "label2", Value: "value1"}, {Name: "label3", Value: "value1"}}, 100, 0)
 	require.NoError(t, err)
-	_, err = app.Add(labels.Labels{{Name: "label1", Value: "value2"}, {Name: "label2", Value: "value2"}}, 100, 0)
+	_, err = app.Add(labels.Labels{{Name: "label1", Value: "value2"}, {Name: "label2", Value: "value2"}, {Name: "label3", Value: "value2"}}, 100, 0)
+	require.NoError(t, err)
+	_, err = app.Add(labels.Labels{{Name: "label1", Value: "value2"}, {Name: "label2", Value: "value2"}, {Name: "label3", Value: "value3"}}, 100, 0)
 	require.NoError(t, err)
 	require.NoError(t, app.Commit())
 
