@@ -66,7 +66,7 @@ func BenchmarkHeadStripeSeriesCreateParallel(b *testing.B) {
 	})
 }
 
-func BenchmarkHeadLabelValuesWithMatchers(b *testing.B) {
+func BenchmarkHeadLabelValuesWithMatchersAndManyMatches(b *testing.B) {
 	head, _ := newTestHead(b, 1000, false)
 	defer func() {
 		require.NoError(b, head.Close())
