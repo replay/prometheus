@@ -1863,6 +1863,61 @@ func TestHeadLabelNamesValuesWithMinMaxRange(t *testing.T) {
 	}
 }
 
+func TestHeadLabelValuesWithMatchers(t *testing.T) {
+	head, _ := newTestHead(t, 1000, false)
+	defer func() {
+		require.NoError(t, head.Close())
+	}()
+
+	app := head.Appender(context.Background())
+	_, err := app.Add(labels.Labels{{Name: "label1", Value: "value1"}, {Name: "label2", Value: "value1"}, {Name: "label3", Value: "value1"}}, 100, 0)
+	require.NoError(t, err)
+	_, err = app.Add(labels.Labels{{Name: "label1", Value: "value2"}, {Name: "label2", Value: "value2"}, {Name: "label3", Value: "value2"}}, 100, 0)
+	require.NoError(t, err)
+	_, err = app.Add(labels.Labels{{Name: "label1", Value: "value2"}, {Name: "label2", Value: "value2"}, {Name: "label3", Value: "value3"}}, 100, 0)
+	require.NoError(t, err)
+	require.NoError(t, app.Commit())
+
+	var testCases = []struct {
+		name           string
+		labelName      string
+		matchers       []*labels.Matcher
+		expectedValues []string
+	}{
+		{
+			"expecting to get both values without matchers",
+			"label2",
+			nil,
+			[]string{"value1", "value2"},
+		}, {
+			"expecting to get both values due to matcher matching both series",
+			"label2",
+			[]*labels.Matcher{labels.MustNewMatcher(labels.MatchRegexp, "label1", "value[0-9]")},
+			[]string{"value1", "value2"},
+		}, {
+			"expecting to get only one value due to matcher matching one series",
+			"label2",
+			[]*labels.Matcher{labels.MustNewMatcher(labels.MatchEqual, "label1", "value2")},
+			[]string{"value2"},
+		}, {
+			"expecting to get no value due to matcher matching nothing",
+			"label2",
+			[]*labels.Matcher{labels.MustNewMatcher(labels.MatchEqual, "label1", "value3")},
+			nil,
+		},
+	}
+
+	for _, tt := range testCases {
+		t.Run(tt.name, func(t *testing.T) {
+			headIdxReader := head.indexRange(0, 200)
+			labelValues, err := headIdxReader.LabelValues(tt.labelName, tt.matchers...)
+			require.NoError(t, err)
+			sort.Strings(labelValues)
+			require.Equal(t, tt.expectedValues, labelValues)
+		})
+	}
+}
+
 func TestErrReuseAppender(t *testing.T) {
 	head, _ := newTestHead(t, 1000, false)
 	defer func() {
