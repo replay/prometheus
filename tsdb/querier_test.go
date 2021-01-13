@@ -1151,7 +1151,7 @@ func (m mockIndex) SortedLabelValues(name string) ([]string, error) {
 	return values, nil
 }
 
-func (m mockIndex) LabelValues(name string) ([]string, error) {
+func (m mockIndex) LabelValues(name string, matchers ...*labels.Matcher) ([]string, error) {
 	values := []string{}
 	for l := range m.postings {
 		if l.Name == name {
@@ -1970,7 +1970,7 @@ func (m mockMatcherIndex) SortedLabelValues(name string) ([]string, error) {
 }
 
 // LabelValues will return error if it is called.
-func (m mockMatcherIndex) LabelValues(name string) ([]string, error) {
+func (m mockMatcherIndex) LabelValues(name string, matchers ...*labels.Matcher) ([]string, error) {
 	return []string{}, errors.New("label values called")
 }
 
