@@ -1903,7 +1903,7 @@ func TestHeadLabelValuesWithMatchers(t *testing.T) {
 			"expecting to get no value due to matcher matching nothing",
 			"label2",
 			[]*labels.Matcher{labels.MustNewMatcher(labels.MatchEqual, "label1", "value3")},
-			nil,
+			[]string{},
 		},
 	}
 
