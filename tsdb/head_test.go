@@ -1869,20 +1869,6 @@ func TestHeadLabelValuesWithMatchers(t *testing.T) {
 		require.NoError(t, head.Close())
 	}()
 
-	// const (
-	// 	firstSeriesTimestamp  int64 = 100
-	// 	secondSeriesTimestamp int64 = 200
-	// 	lastSeriesTimestamp   int64 = 300
-	// )
-	// var (
-	// 	seriesTimestamps = []int64{firstSeriesTimestamp,
-	// 		secondSeriesTimestamp,
-	// 		lastSeriesTimestamp,
-	// 	}
-	// 	expectedLabelNames  = []string{"a", "b", "c"}
-	// 	expectedLabelValues = []string{"d", "e", "f"}
-	// )
-
 	app := head.Appender(context.Background())
 	_, err := app.Add(labels.Labels{{Name: "label1", Value: "value1"}, {Name: "label2", Value: "value1"}}, 100, 0)
 	require.NoError(t, err)
