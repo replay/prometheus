@@ -592,28 +592,16 @@ func (api *API) labelValues(r *http.Request) (result apiFuncResult) {
 		warnings storage.Warnings
 	)
 	if len(matcherSets) > 0 {
-		hints := &storage.SelectHints{
-			Start: timestamp.FromTime(start),
-			End:   timestamp.FromTime(end),
-			Func:  "series", // There is no series function, this token is used for lookups that don't need samples.
-		}
-
 		labelValuesSet := make(map[string]struct{})
 		// Get all series which match matchers.
 		for _, mset := range matcherSets {
-			s := q.Select(false, hints, mset...)
-			for s.Next() {
-				series := s.At()
-				labelValue := series.Labels().Get(name)
-				// Filter out empty value.
-				if labelValue == "" {
-					continue
-				}
-				labelValuesSet[labelValue] = struct{}{}
-			}
-			warnings = append(warnings, s.Warnings()...)
-			if err := s.Err(); err != nil {
+			values, w, err := q.LabelValues(name, mset...)
+			if err != nil {
 				return apiFuncResult{nil, &apiError{errorExec, err}, warnings, nil}
+			}
+			warnings = append(warnings, w...)
+			for _, value := range values {
+				labelValuesSet[value] = struct{}{}
 			}
 		}
 
