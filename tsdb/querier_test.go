@@ -1145,8 +1145,8 @@ func (m mockIndex) Close() error {
 	return nil
 }
 
-func (m mockIndex) SortedLabelValues(name string) ([]string, error) {
-	values, _ := m.LabelValues(name)
+func (m mockIndex) SortedLabelValues(name string, matchers ...*labels.Matcher) ([]string, error) {
+	values, _ := m.LabelValues(name, matchers...)
 	sort.Strings(values)
 	return values, nil
 }
@@ -1965,7 +1965,7 @@ func (m mockMatcherIndex) Symbols() index.StringIter { return nil }
 func (m mockMatcherIndex) Close() error { return nil }
 
 // SortedLabelValues will return error if it is called.
-func (m mockMatcherIndex) SortedLabelValues(name string) ([]string, error) {
+func (m mockMatcherIndex) SortedLabelValues(name string, matchers ...*labels.Matcher) ([]string, error) {
 	return []string{}, errors.New("sorted label values called")
 }
 
