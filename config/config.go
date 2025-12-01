@@ -289,6 +289,8 @@ type Config struct {
 	RemoteReadConfigs  []*RemoteReadConfig  `yaml:"remote_read,omitempty"`
 	OTLPConfig         OTLPConfig           `yaml:"otlp,omitempty"`
 
+	DynamicLabelsFile string `yaml:"dynamic_labels_file,omitempty"`
+
 	loaded bool // Certain methods require configuration to use Load validation.
 }
 
@@ -313,6 +315,7 @@ func (c *Config) SetDirectory(dir string) {
 	for _, c := range c.RemoteReadConfigs {
 		c.SetDirectory(dir)
 	}
+	c.DynamicLabelsFile = config.JoinDir(dir, c.DynamicLabelsFile)
 }
 
 func (c Config) String() string {
@@ -1681,4 +1684,26 @@ func sanitizeAttributes(attributes []string, adjective string) error {
 		attributes[i] = attr
 	}
 	return err
+}
+
+// LabelMatcherConfig defines a single label matcher configuration
+type LabelMatcherConfig struct {
+	Name      string `yaml:"name"`
+	Value     string `yaml:"value"`
+	MatchType string `yaml:"match_type,omitempty"`
+}
+
+// DynamicLabelsConfig defines the structure for dynamic labels configuration
+type DynamicLabelsConfig struct {
+	// DynamicLabels is a map of dynamic label name -> dynamic label value -> list of matchers
+	DynamicLabels map[string]map[string][]LabelMatcherConfig `yaml:"dynamic_labels"`
+}
+
+// UnmarshalYAML implements the yaml.Unmarshaler interface.
+func (c *DynamicLabelsConfig) UnmarshalYAML(unmarshal func(any) error) error {
+	type plain DynamicLabelsConfig
+	if err := unmarshal((*plain)(c)); err != nil {
+		return err
+	}
+	return nil
 }

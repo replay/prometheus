@@ -27,6 +27,7 @@ import (
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
 	"github.com/prometheus/prometheus/tsdb/chunks"
+	"github.com/prometheus/prometheus/tsdb/dynamic_labels"
 	tsdb_errors "github.com/prometheus/prometheus/tsdb/errors"
 	"github.com/prometheus/prometheus/tsdb/index"
 	"github.com/prometheus/prometheus/tsdb/tombstones"
@@ -35,6 +36,10 @@ import (
 
 // checkContextEveryNIterations is used in some tight loops to check if the context is done.
 const checkContextEveryNIterations = 100
+
+type ruleProviderGetter interface {
+	RuleProvider() dynamic_labels.RuleProvider
+}
 
 type blockBaseQuerier struct {
 	blockID    ulid.ULID
@@ -141,11 +146,23 @@ func selectSeriesSet(ctx context.Context, sortSeries bool, hints *storage.Select
 		disableTrimming = hints.DisableTrimming
 		if hints.Func == "series" {
 			// When you're only looking up metadata (for example series API), you don't need to load any chunks.
-			return newBlockSeriesSet(index, newNopChunkReader(), tombstones, p, mint, maxt, disableTrimming)
+			ss := newBlockSeriesSet(index, newNopChunkReader(), tombstones, p, mint, maxt, disableTrimming)
+			if ruleProviderGetter, ok := ix.(ruleProviderGetter); ok {
+				if ruleProvider := ruleProviderGetter.RuleProvider(); ruleProvider != nil {
+					return dynamic_labels.NewEnrichedSeriesSet(ss, ruleProvider)
+				}
+			}
+			return ss
 		}
 	}
 
-	return newBlockSeriesSet(index, chunks, tombstones, p, mint, maxt, disableTrimming)
+	ss := newBlockSeriesSet(index, chunks, tombstones, p, mint, maxt, disableTrimming)
+	if ruleProviderGetter, ok := ix.(ruleProviderGetter); ok {
+		if ruleProvider := ruleProviderGetter.RuleProvider(); ruleProvider != nil {
+			return dynamic_labels.NewEnrichedSeriesSet(ss, ruleProvider)
+		}
+	}
+	return ss
 }
 
 // blockChunkQuerier provides chunk querying access to a single block database.
@@ -187,7 +204,13 @@ func selectChunkSeriesSet(ctx context.Context, sortSeries bool, hints *storage.S
 	if sortSeries {
 		p = index.SortedPostings(p)
 	}
-	return NewBlockChunkSeriesSet(blockID, index, chunks, tombstones, p, mint, maxt, disableTrimming)
+	css := NewBlockChunkSeriesSet(blockID, index, chunks, tombstones, p, mint, maxt, disableTrimming)
+	if ruleProviderGetter, ok := ix.(ruleProviderGetter); ok {
+		if ruleProvider := ruleProviderGetter.RuleProvider(); ruleProvider != nil {
+			return dynamic_labels.NewEnrichedChunkSeriesSet(css, ruleProvider)
+		}
+	}
+	return css
 }
 
 // PostingsForMatchers assembles a single postings iterator against the index reader
@@ -198,136 +221,217 @@ func PostingsForMatchers(ctx context.Context, ix IndexReader, ms ...*labels.Matc
 		return ix.Postings(ctx, k, v)
 	}
 
-	var its, notIts []index.Postings
-	// See which label must be non-empty.
-	// Optimization for case like {l=~".", l!="1"}.
-	labelMustBeSet := make(map[string]bool, len(ms))
-	for _, m := range ms {
-		if !m.Matches("") {
-			labelMustBeSet[m.Name] = true
-		}
-	}
-	isSubtractingMatcher := func(m *labels.Matcher) bool {
-		if !labelMustBeSet[m.Name] {
-			return true
-		}
-		return (m.Type == labels.MatchNotEqual || m.Type == labels.MatchNotRegexp) && m.Matches("")
-	}
-	hasSubtractingMatchers, hasIntersectingMatchers := false, false
-	for _, m := range ms {
-		if isSubtractingMatcher(m) {
-			hasSubtractingMatchers = true
-		} else {
-			hasIntersectingMatchers = true
-		}
-	}
+	var (
+		dynamicMs []*labels.Matcher
+		staticMs  []*labels.Matcher
+	)
 
-	if hasSubtractingMatchers && !hasIntersectingMatchers {
-		// If there's nothing to subtract from, add in everything and remove the notIts later.
-		// We prefer to get AllPostings so that the base of subtraction (i.e. allPostings)
-		// doesn't include series that may be added to the index reader during this function call.
-		k, v := index.AllPostingsKey()
-		allPostings, err := ix.Postings(ctx, k, v)
-		if err != nil {
-			return nil, err
-		}
-		its = append(its, allPostings)
-	}
-
-	// Sort matchers to have the intersecting matchers first.
-	// This way the base for subtraction is smaller and
-	// there is no chance that the set we subtract from
-	// contains postings of series that didn't exist when
-	// we constructed the set we subtract by.
-	slices.SortStableFunc(ms, func(i, j *labels.Matcher) int {
-		if !isSubtractingMatcher(i) && isSubtractingMatcher(j) {
-			return -1
-		}
-
-		return +1
-	})
-
-	for _, m := range ms {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		switch {
-		case m.Name == "" && m.Value == "":
-			// We already handled the case at the top of the function,
-			// and it is unexpected to get all postings again here.
-			return nil, errors.New("unexpected all postings")
-
-		case m.Type == labels.MatchRegexp && m.Value == ".*":
-			// .* regexp matches any string: do nothing.
-		case m.Type == labels.MatchNotRegexp && m.Value == ".*":
-			return index.EmptyPostings(), nil
-
-		case m.Type == labels.MatchRegexp && m.Value == ".+":
-			// .+ regexp matches any non-empty string: get postings for all label values.
-			it := ix.PostingsForAllLabelValues(ctx, m.Name)
-			if index.IsEmptyPostingsType(it) {
-				return index.EmptyPostings(), nil
-			}
-			its = append(its, it)
-		case m.Type == labels.MatchNotRegexp && m.Value == ".+":
-			// .+ regexp matches any non-empty string: get postings for all label values and remove them.
-			notIts = append(notIts, ix.PostingsForAllLabelValues(ctx, m.Name))
-
-		case labelMustBeSet[m.Name]:
-			// If this matcher must be non-empty, we can be smarter.
-			matchesEmpty := m.Matches("")
-			isNot := m.Type == labels.MatchNotEqual || m.Type == labels.MatchNotRegexp
-			switch {
-			case isNot && matchesEmpty: // l!="foo"
-				// If the label can't be empty and is a Not and the inner matcher
-				// doesn't match empty, then subtract it out at the end.
-				inverse, err := m.Inverse()
-				if err != nil {
-					return nil, err
+	if ruleProviderGetter, ok := ix.(ruleProviderGetter); ok {
+		if ruleProvider := ruleProviderGetter.RuleProvider(); ruleProvider != nil {
+			rules := ruleProvider.GetRules()
+			for _, m := range ms {
+				if _, ok := rules[m.Name]; ok {
+					dynamicMs = append(dynamicMs, m)
+				} else {
+					staticMs = append(staticMs, m)
 				}
+			}
+		} else {
+			staticMs = ms
+		}
+	} else {
+		staticMs = ms
+	}
 
-				it, err := postingsForMatcher(ctx, ix, inverse)
+	var its, notIts []index.Postings
+
+	// Process static matchers
+	if len(staticMs) > 0 {
+		// See which label must be non-empty.
+		// Optimization for case like {l=~".", l!="1"}.
+		labelMustBeSet := make(map[string]bool, len(staticMs))
+		for _, m := range staticMs {
+			if !m.Matches("") {
+				labelMustBeSet[m.Name] = true
+			}
+		}
+		isSubtractingMatcher := func(m *labels.Matcher) bool {
+			if !labelMustBeSet[m.Name] {
+				return true
+			}
+			return (m.Type == labels.MatchNotEqual || m.Type == labels.MatchNotRegexp) && m.Matches("")
+		}
+		hasSubtractingMatchers, hasIntersectingMatchers := false, false
+		for _, m := range staticMs {
+			if isSubtractingMatcher(m) {
+				hasSubtractingMatchers = true
+			} else {
+				hasIntersectingMatchers = true
+			}
+		}
+
+		if hasSubtractingMatchers && !hasIntersectingMatchers {
+			// If there's nothing to subtract from, add in everything and remove the notIts later.
+			// We prefer to get AllPostings so that the base of subtraction (i.e. allPostings)
+			// doesn't include series that may be added to the index reader during this function call.
+			k, v := index.AllPostingsKey()
+			allPostings, err := ix.Postings(ctx, k, v)
+			if err != nil {
+				return nil, err
+			}
+			its = append(its, allPostings)
+		}
+
+		// Sort matchers to have the intersecting matchers first.
+		// This way the base for subtraction is smaller and
+		// there is no chance that the set we subtract from
+		// contains postings of series that didn't exist when
+		// we constructed the set we subtract by.
+		slices.SortStableFunc(staticMs, func(i, j *labels.Matcher) int {
+			if !isSubtractingMatcher(i) && isSubtractingMatcher(j) {
+				return -1
+			}
+
+			return +1
+		})
+
+		for _, m := range staticMs {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			switch {
+			case m.Name == "" && m.Value == "":
+				// We already handled the case at the top of the function,
+				// and it is unexpected to get all postings again here.
+				return nil, errors.New("unexpected all postings")
+
+			case m.Type == labels.MatchRegexp && m.Value == ".*":
+				// .* regexp matches any string: do nothing.
+			case m.Type == labels.MatchNotRegexp && m.Value == ".*":
+				return index.EmptyPostings(), nil
+
+			case m.Type == labels.MatchRegexp && m.Value == ".+":
+				// .+ regexp matches any non-empty string: get postings for all label values.
+				it := ix.PostingsForAllLabelValues(ctx, m.Name)
+				if index.IsEmptyPostingsType(it) {
+					return index.EmptyPostings(), nil
+				}
+				its = append(its, it)
+			case m.Type == labels.MatchNotRegexp && m.Value == ".+":
+				// .+ regexp matches any non-empty string: get postings for all label values and remove them.
+				notIts = append(notIts, ix.PostingsForAllLabelValues(ctx, m.Name))
+
+			case labelMustBeSet[m.Name]:
+				// If this matcher must be non-empty, we can be smarter.
+				matchesEmpty := m.Matches("")
+				isNot := m.Type == labels.MatchNotEqual || m.Type == labels.MatchNotRegexp
+				switch {
+				case isNot && matchesEmpty: // l!="foo"
+					// If the label can't be empty and is a Not and the inner matcher
+					// doesn't match empty, then subtract it out at the end.
+					inverse, err := m.Inverse()
+					if err != nil {
+						return nil, err
+					}
+
+					it, err := postingsForMatcher(ctx, ix, inverse)
+					if err != nil {
+						return nil, err
+					}
+					notIts = append(notIts, it)
+				case isNot && !matchesEmpty: // l!=""
+					// If the label can't be empty and is a Not, but the inner matcher can
+					// be empty we need to use inversePostingsForMatcher.
+					inverse, err := m.Inverse()
+					if err != nil {
+						return nil, err
+					}
+
+					it, err := inversePostingsForMatcher(ctx, ix, inverse)
+					if err != nil {
+						return nil, err
+					}
+					if index.IsEmptyPostingsType(it) {
+						return index.EmptyPostings(), nil
+					}
+					its = append(its, it)
+				default: // l="a", l=~"a|b", l=~"a.b", etc.
+					// Non-Not matcher, use normal postingsForMatcher.
+					it, err := postingsForMatcher(ctx, ix, m)
+					if err != nil {
+						return nil, err
+					}
+					if index.IsEmptyPostingsType(it) {
+						return index.EmptyPostings(), nil
+					}
+					its = append(its, it)
+				}
+			default: // l=""
+				// If the matchers for a labelname selects an empty value, it selects all
+				// the series which don't have the label name set too. See:
+				// https://github.com/prometheus/prometheus/issues/3575 and
+				// https://github.com/prometheus/prometheus/pull/3578#issuecomment-351653555
+				it, err := inversePostingsForMatcher(ctx, ix, m)
 				if err != nil {
 					return nil, err
 				}
 				notIts = append(notIts, it)
-			case isNot && !matchesEmpty: // l!=""
-				// If the label can't be empty and is a Not, but the inner matcher can
-				// be empty we need to use inversePostingsForMatcher.
-				inverse, err := m.Inverse()
-				if err != nil {
-					return nil, err
-				}
+			}
+		}
+	} else if len(dynamicMs) > 0 && len(its) == 0 {
+		// If no static matchers but we have dynamic matchers, we might need a base set if we are subtracting.
+		// But we handle this inside dynamic loop.
+	}
 
-				it, err := inversePostingsForMatcher(ctx, ix, inverse)
-				if err != nil {
-					return nil, err
+	// Process dynamic matchers
+	if len(dynamicMs) > 0 {
+		ruleProvider := ix.(ruleProviderGetter).RuleProvider()
+		rules := ruleProvider.GetRules()
+
+		for _, m := range dynamicMs {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+
+			values := rules[m.Name]
+			var subIts []index.Postings
+
+			if m.Matches("") {
+				for val, matchers := range values {
+					if !m.Matches(val) {
+						// These series should be excluded
+						p, err := PostingsForMatchers(ctx, ix, matchers...)
+						if err != nil {
+							return nil, err
+						}
+						notIts = append(notIts, p)
+					}
 				}
-				if index.IsEmptyPostingsType(it) {
+				if len(its) == 0 {
+					k, v := index.AllPostingsKey()
+					allPostings, err := ix.Postings(ctx, k, v)
+					if err != nil {
+						return nil, err
+					}
+					its = append(its, allPostings)
+				}
+			} else {
+				// Matcher does NOT match empty.
+				for val, matchers := range values {
+					if m.Matches(val) {
+						p, err := PostingsForMatchers(ctx, ix, matchers...)
+						if err != nil {
+							return nil, err
+						}
+						subIts = append(subIts, p)
+					}
+				}
+				if len(subIts) > 0 {
+					its = append(its, index.Merge(ctx, subIts...))
+				} else {
 					return index.EmptyPostings(), nil
 				}
-				its = append(its, it)
-			default: // l="a", l=~"a|b", l=~"a.b", etc.
-				// Non-Not matcher, use normal postingsForMatcher.
-				it, err := postingsForMatcher(ctx, ix, m)
-				if err != nil {
-					return nil, err
-				}
-				if index.IsEmptyPostingsType(it) {
-					return index.EmptyPostings(), nil
-				}
-				its = append(its, it)
 			}
-		default: // l=""
-			// If the matchers for a labelname selects an empty value, it selects all
-			// the series which don't have the label name set too. See:
-			// https://github.com/prometheus/prometheus/issues/3575 and
-			// https://github.com/prometheus/prometheus/pull/3578#issuecomment-351653555
-			it, err := inversePostingsForMatcher(ctx, ix, m)
-			if err != nil {
-				return nil, err
-			}
-			notIts = append(notIts, it)
 		}
 	}
 

@@ -25,6 +25,7 @@ import (
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
 	"github.com/prometheus/prometheus/tsdb/chunks"
+	"github.com/prometheus/prometheus/tsdb/dynamic_labels"
 	"github.com/prometheus/prometheus/tsdb/index"
 )
 
@@ -112,6 +113,10 @@ func (h *headIndexReader) PostingsForLabelMatching(ctx context.Context, name str
 
 func (h *headIndexReader) PostingsForAllLabelValues(ctx context.Context, name string) index.Postings {
 	return h.head.postings.PostingsForAllLabelValues(ctx, name)
+}
+
+func (h *headIndexReader) RuleProvider() dynamic_labels.RuleProvider {
+	return h.head.opts.RuleProvider
 }
 
 func (h *headIndexReader) SortedPostings(p index.Postings) index.Postings {

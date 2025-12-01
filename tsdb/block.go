@@ -33,6 +33,7 @@ import (
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
 	"github.com/prometheus/prometheus/tsdb/chunks"
+	"github.com/prometheus/prometheus/tsdb/dynamic_labels"
 	tsdb_errors "github.com/prometheus/prometheus/tsdb/errors"
 	"github.com/prometheus/prometheus/tsdb/fileutil"
 	"github.com/prometheus/prometheus/tsdb/index"
@@ -322,11 +323,13 @@ type Block struct {
 	numBytesIndex     int64
 	numBytesTombstone int64
 	numBytesMeta      int64
+
+	ruleProvider dynamic_labels.RuleProvider
 }
 
 // OpenBlock opens the block in the directory. It can be passed a chunk pool, which is used
 // to instantiate chunk structs.
-func OpenBlock(logger *slog.Logger, dir string, pool chunkenc.Pool, postingsDecoderFactory PostingsDecoderFactory) (pb *Block, err error) {
+func OpenBlock(logger *slog.Logger, dir string, pool chunkenc.Pool, postingsDecoderFactory PostingsDecoderFactory, ruleProvider dynamic_labels.RuleProvider) (pb *Block, err error) {
 	if logger == nil {
 		logger = promslog.NewNopLogger()
 	}
@@ -375,6 +378,7 @@ func OpenBlock(logger *slog.Logger, dir string, pool chunkenc.Pool, postingsDeco
 		numBytesIndex:     ir.Size(),
 		numBytesTombstone: sizeTomb,
 		numBytesMeta:      sizeMeta,
+		ruleProvider:      ruleProvider,
 	}
 	return pb, nil
 }

@@ -1,0 +1,110 @@
+// Copyright 2025 The Prometheus Authors
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package dynamic_labels
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/prometheus/prometheus/model/labels"
+	"github.com/stretchr/testify/require"
+)
+
+func TestFileRuleProvider(t *testing.T) {
+	tmpDir := t.TempDir()
+	filename := filepath.Join(tmpDir, "dynamic_labels.yml")
+
+	content := `
+dynamic_labels:
+  region:
+    us-east-1:
+      - name: "zone"
+        value: "us-east-1a"
+      - name: "cluster"
+        value: "prod"
+    eu-west-1:
+      - name: "zone"
+        match_type: "=~"
+        value: "eu-west-1.*"
+`
+	err := os.WriteFile(filename, []byte(content), 0o666)
+	require.NoError(t, err)
+
+	provider, err := NewFileRuleProvider(filename)
+	require.NoError(t, err)
+
+	// Test GetRules
+	rules := provider.GetRules()
+	require.Len(t, rules, 1)
+	require.Len(t, rules["region"], 2)
+
+	// Test GetMatchersForDynamicLabel
+	matchers := provider.GetMatchersForDynamicLabel("region", "us-east-1")
+	require.Len(t, matchers, 2)
+	require.Equal(t, "zone", matchers[0].Name)
+	require.Equal(t, "us-east-1a", matchers[0].Value)
+	require.Equal(t, labels.MatchEqual, matchers[0].Type)
+
+	// Test GetDynamicLabelsForSeries
+	cases := []struct {
+		name     string
+		labels   labels.Labels
+		expected labels.Labels
+	}{
+		{
+			name:     "match us-east-1",
+			labels:   labels.FromStrings("zone", "us-east-1a", "cluster", "prod", "app", "foo"),
+			expected: labels.FromStrings("region", "us-east-1", "zone", "us-east-1a", "cluster", "prod", "app", "foo"),
+		},
+		{
+			name:     "match eu-west-1",
+			labels:   labels.FromStrings("zone", "eu-west-1b", "app", "bar"),
+			expected: labels.FromStrings("region", "eu-west-1", "zone", "eu-west-1b", "app", "bar"),
+		},
+		{
+			name:     "no match",
+			labels:   labels.FromStrings("zone", "us-west-1a", "app", "baz"),
+			expected: labels.FromStrings("zone", "us-west-1a", "app", "baz"),
+		},
+		{
+			name:     "partial match (missing cluster for us-east-1)",
+			labels:   labels.FromStrings("zone", "us-east-1a", "app", "foo"),
+			expected: labels.FromStrings("zone", "us-east-1a", "app", "foo"),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// enricher.EnrichLabels uses provider.GetDynamicLabelsForSeries
+			// but we can test GetDynamicLabelsForSeries directly here first to see what it returns
+			dl := provider.GetDynamicLabelsForSeries(tc.labels)
+			
+			// Now test EnrichLabels helper which merges them
+			enriched := EnrichLabels(tc.labels, provider)
+			require.Equal(t, tc.expected, enriched, "EnrichLabels mismatch")
+			
+			// Check that GetDynamicLabelsForSeries only returned the dynamic part
+			if tc.expected.Len() > tc.labels.Len() {
+				require.True(t, dl.Len() > 0)
+			}
+		})
+	}
+}
+
+func TestParseMatchers(t *testing.T) {
+	// This effectively tests parsing via the provider load test above, 
+	// but we can add specific edge cases here if needed.
+}
+
