@@ -64,7 +64,7 @@ func TestPostingsForMatchers_DynamicLabels(t *testing.T) {
 	// Postings(cluster="prod") -> [1, 3]
 	// Postings(zone="eu-west-1b") -> [4]
 	// Intersection(zone="us-east-1a", cluster="prod") -> [1]
-	
+
 	// We will mock the reader to return postings based on inputs.
 	reader := &smartMockIndexReader{
 		rules: provider,
@@ -109,7 +109,7 @@ func TestPostingsForMatchers_DynamicLabels(t *testing.T) {
 	// Should exclude series matching (zone="us-east-1a" AND cluster="prod")
 	// We assume AllPostings is [1, 2, 3, 4, 5]
 	reader.allPostings = []uint64{1, 2, 3, 4, 5}
-	
+
 	// (zone="us-east-1a" AND cluster="prod") -> [1]
 	// AllPostings - [1] -> [2, 3, 4, 5]
 	p, err = PostingsForMatchers(ctx, reader, labels.MustNewMatcher(labels.MatchNotEqual, "region", "us-east-1"))
@@ -123,20 +123,17 @@ func TestPostingsForMatchers_DynamicLabels(t *testing.T) {
 }
 
 type smartMockIndexReader struct {
+	IndexReader
 	rules       dynamic_labels.RuleProvider
 	postings    map[string]map[string][]uint64
 	allPostings []uint64
-}
-
-func (m *smartMockIndexReader) LabelValues(ctx context.Context, name string, hints *storage.LabelHints, matchers ...*labels.Matcher) ([]string, error) {
-	return nil, nil
 }
 
 func (m *smartMockIndexReader) Postings(ctx context.Context, name string, values ...string) (index.Postings, error) {
 	if name == "" && (len(values) == 0 || (len(values) == 1 && values[0] == "")) { // AllPostings
 		return index.NewListPostings(toStorageRefs(m.allPostings)), nil
 	}
-	
+
 	var res []index.Postings
 	for _, v := range values {
 		if p, ok := m.postings[name][v]; ok {
