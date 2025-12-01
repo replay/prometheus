@@ -514,7 +514,7 @@ func (c *LeveledCompactor) CompactWithBlockPopulator(dest string, dirs []string,
 
 		if b == nil {
 			var err error
-			b, err = OpenBlock(c.logger, d, c.chunkPool, c.postingsDecoderFactory)
+			b, err = OpenBlock(c.logger, d, c.chunkPool, c.postingsDecoderFactory, nil)
 			if err != nil {
 				return nil, err
 			}

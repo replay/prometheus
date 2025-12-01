@@ -147,7 +147,7 @@ func selectSeriesSet(ctx context.Context, sortSeries bool, hints *storage.Select
 		if hints.Func == "series" {
 			// When you're only looking up metadata (for example series API), you don't need to load any chunks.
 			ss := newBlockSeriesSet(index, newNopChunkReader(), tombstones, p, mint, maxt, disableTrimming)
-			if ruleProviderGetter, ok := ix.(ruleProviderGetter); ok {
+			if ruleProviderGetter, ok := index.(ruleProviderGetter); ok {
 				if ruleProvider := ruleProviderGetter.RuleProvider(); ruleProvider != nil {
 					return dynamic_labels.NewEnrichedSeriesSet(ss, ruleProvider)
 				}
@@ -157,7 +157,7 @@ func selectSeriesSet(ctx context.Context, sortSeries bool, hints *storage.Select
 	}
 
 	ss := newBlockSeriesSet(index, chunks, tombstones, p, mint, maxt, disableTrimming)
-	if ruleProviderGetter, ok := ix.(ruleProviderGetter); ok {
+	if ruleProviderGetter, ok := index.(ruleProviderGetter); ok {
 		if ruleProvider := ruleProviderGetter.RuleProvider(); ruleProvider != nil {
 			return dynamic_labels.NewEnrichedSeriesSet(ss, ruleProvider)
 		}
@@ -205,7 +205,7 @@ func selectChunkSeriesSet(ctx context.Context, sortSeries bool, hints *storage.S
 		p = index.SortedPostings(p)
 	}
 	css := NewBlockChunkSeriesSet(blockID, index, chunks, tombstones, p, mint, maxt, disableTrimming)
-	if ruleProviderGetter, ok := ix.(ruleProviderGetter); ok {
+	if ruleProviderGetter, ok := index.(ruleProviderGetter); ok {
 		if ruleProvider := ruleProviderGetter.RuleProvider(); ruleProvider != nil {
 			return dynamic_labels.NewEnrichedChunkSeriesSet(css, ruleProvider)
 		}
