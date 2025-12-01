@@ -122,4 +122,3 @@ func (s *enrichedChunkSeries) Labels() labels.Labels {
 // `tsdb.blockQuerier` returns `storage.SeriesSet`.
 
 // Helper for generic series set in tsdb package if needed.
-

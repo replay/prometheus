@@ -31,10 +31,6 @@ type RuleProvider interface {
 	// The value is a list of matchers that a series must match to get the dynamic label.
 	GetRules() map[string]map[string][]*labels.Matcher
 
-	// GetMatchersForDynamicLabel returns the matchers for a specific dynamic label and value.
-	// It returns nil if no rule exists for the given label and value.
-	GetMatchersForDynamicLabel(name, value string) []*labels.Matcher
-
 	// GetDynamicLabelsForSeries returns the dynamic labels that should be added to the series
 	// based on its intrinsic labels.
 	GetDynamicLabelsForSeries(seriesLabels labels.Labels) labels.Labels
@@ -97,16 +93,6 @@ func (p *FileRuleProvider) GetRules() map[string]map[string][]*labels.Matcher {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.rules
-}
-
-func (p *FileRuleProvider) GetMatchersForDynamicLabel(name, value string) []*labels.Matcher {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-
-	if values, ok := p.rules[name]; ok {
-		return values[value]
-	}
-	return nil
 }
 
 func (p *FileRuleProvider) GetDynamicLabelsForSeries(seriesLabels labels.Labels) labels.Labels {

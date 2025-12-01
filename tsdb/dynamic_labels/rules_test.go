@@ -50,13 +50,6 @@ dynamic_labels:
 	require.Len(t, rules, 1)
 	require.Len(t, rules["region"], 2)
 
-	// Test GetMatchersForDynamicLabel
-	matchers := provider.GetMatchersForDynamicLabel("region", "us-east-1")
-	require.Len(t, matchers, 2)
-	require.Equal(t, "zone", matchers[0].Name)
-	require.Equal(t, "us-east-1a", matchers[0].Value)
-	require.Equal(t, labels.MatchEqual, matchers[0].Type)
-
 	// Test GetDynamicLabelsForSeries
 	cases := []struct {
 		name     string

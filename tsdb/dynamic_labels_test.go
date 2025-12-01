@@ -34,10 +34,6 @@ func (m *mockRuleProvider) GetRules() map[string]map[string][]*labels.Matcher {
 	return m.rules
 }
 
-func (m *mockRuleProvider) GetMatchersForDynamicLabel(name, value string) []*labels.Matcher {
-	return m.rules[name][value]
-}
-
 func (m *mockRuleProvider) GetDynamicLabelsForSeries(seriesLabels labels.Labels) labels.Labels {
 	// Not used in PostingsForMatchers
 	return labels.Labels{}
