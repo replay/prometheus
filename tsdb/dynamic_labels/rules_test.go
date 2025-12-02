@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/stretchr/testify/require"
@@ -83,21 +84,86 @@ dynamic_labels:
 			// enricher.EnrichLabels uses provider.GetDynamicLabelsForSeries
 			// but we can test GetDynamicLabelsForSeries directly here first to see what it returns
 			dl := provider.GetDynamicLabelsForSeries(tc.labels)
-			
+
 			// Now test EnrichLabels helper which merges them
 			enriched := EnrichLabels(tc.labels, provider)
 			require.Equal(t, tc.expected, enriched, "EnrichLabels mismatch")
-			
+
 			// Check that GetDynamicLabelsForSeries only returned the dynamic part
 			if tc.expected.Len() > tc.labels.Len() {
 				require.True(t, dl.Len() > 0)
 			}
 		})
 	}
+
+	// Clean up the watcher
+	provider.Stop()
 }
 
 func TestParseMatchers(t *testing.T) {
-	// This effectively tests parsing via the provider load test above, 
+	// This effectively tests parsing via the provider load test above,
 	// but we can add specific edge cases here if needed.
 }
 
+func TestFileRuleProviderRuntimeReload(t *testing.T) {
+	tmpDir := t.TempDir()
+	filename := filepath.Join(tmpDir, "dynamic_labels.yml")
+
+	// Initial content
+	initialContent := `
+dynamic_labels:
+  region:
+    us-east-1:
+      - name: "zone"
+        value: "us-east-1a"
+`
+	err := os.WriteFile(filename, []byte(initialContent), 0o666)
+	require.NoError(t, err)
+
+	provider, err := NewFileRuleProvider(filename)
+	require.NoError(t, err)
+	defer provider.Stop()
+
+	// Verify initial rules
+	rules := provider.GetRules()
+	require.Len(t, rules, 1)
+	require.Len(t, rules["region"], 1)
+	require.Contains(t, rules["region"], "us-east-1")
+
+	// Update the file with new rules
+	updatedContent := `
+dynamic_labels:
+  region:
+    us-east-1:
+      - name: "zone"
+        value: "us-east-1a"
+    eu-west-1:
+      - name: "zone"
+        match_type: "=~"
+        value: "eu-west-1.*"
+  environment:
+    production:
+      - name: "cluster"
+        value: "prod"
+`
+	err = os.WriteFile(filename, []byte(updatedContent), 0o666)
+	require.NoError(t, err)
+
+	// Wait for the file watcher to detect the change and reload
+	// The debounce is 100ms, so wait a bit longer
+	time.Sleep(300 * time.Millisecond)
+
+	// Verify updated rules
+	rules = provider.GetRules()
+	require.Len(t, rules, 2)           // region and environment
+	require.Len(t, rules["region"], 2) // us-east-1 and eu-west-1
+	require.Contains(t, rules["region"], "us-east-1")
+	require.Contains(t, rules["region"], "eu-west-1")
+	require.Len(t, rules["environment"], 1)
+	require.Contains(t, rules["environment"], "production")
+
+	// Test that the new rules are applied
+	labels := labels.FromStrings("zone", "eu-west-1b", "app", "test")
+	enriched := EnrichLabels(labels, provider)
+	require.Equal(t, "eu-west-1", enriched.Get("region"))
+}
