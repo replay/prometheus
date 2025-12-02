@@ -31,14 +31,12 @@ func TestFileRuleProvider(t *testing.T) {
 dynamic_labels:
   region:
     us-east-1:
-      - name: "zone"
-        value: "us-east-1a"
-      - name: "cluster"
-        value: "prod"
+      - '{zone="us-east-1a", cluster="prod"}'
     eu-west-1:
-      - name: "zone"
-        match_type: "=~"
-        value: "eu-west-1.*"
+      - '{zone=~"eu-west-1.*"}'
+    eu-central-0:
+      - '{zone="eu-central-0a"}'
+      - '{zone="eu-central-0b"}'
 `
 	err := os.WriteFile(filename, []byte(content), 0o666)
 	require.NoError(t, err)
@@ -49,7 +47,7 @@ dynamic_labels:
 	// Test GetRules
 	rules := provider.GetRules()
 	require.Len(t, rules, 1)
-	require.Len(t, rules["region"], 2)
+	require.Len(t, rules["region"], 3)
 
 	// Test GetDynamicLabelsForSeries
 	cases := []struct {
@@ -76,6 +74,11 @@ dynamic_labels:
 			name:     "partial match (missing cluster for us-east-1)",
 			labels:   labels.FromStrings("zone", "us-east-1a", "app", "foo"),
 			expected: labels.FromStrings("zone", "us-east-1a", "app", "foo"),
+		},
+		{
+			name:     "partial match (test logical OR between matcher sets)",
+			labels:   labels.FromStrings("zone", "eu-central-0b", "app", "foo"),
+			expected: labels.FromStrings("region", "eu-central-0", "zone", "eu-central-0b", "app", "foo"),
 		},
 	}
 
@@ -114,8 +117,7 @@ func TestFileRuleProviderRuntimeReload(t *testing.T) {
 dynamic_labels:
   region:
     us-east-1:
-      - name: "zone"
-        value: "us-east-1a"
+      - '{zone="us-east-1a"}'
 `
 	err := os.WriteFile(filename, []byte(initialContent), 0o666)
 	require.NoError(t, err)
@@ -135,16 +137,12 @@ dynamic_labels:
 dynamic_labels:
   region:
     us-east-1:
-      - name: "zone"
-        value: "us-east-1a"
+      - '{zone="us-east-1a"}'
     eu-west-1:
-      - name: "zone"
-        match_type: "=~"
-        value: "eu-west-1.*"
+      - '{zone=~"eu-west-1.*"}'
   environment:
     production:
-      - name: "cluster"
-        value: "prod"
+      - '{cluster="prod"}'
 `
 	err = os.WriteFile(filename, []byte(updatedContent), 0o666)
 	require.NoError(t, err)

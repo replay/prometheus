@@ -1686,17 +1686,10 @@ func sanitizeAttributes(attributes []string, adjective string) error {
 	return err
 }
 
-// LabelMatcherConfig defines a single label matcher configuration
-type LabelMatcherConfig struct {
-	Name      string `yaml:"name"`
-	Value     string `yaml:"value"`
-	MatchType string `yaml:"match_type,omitempty"`
-}
-
 // DynamicLabelsConfig defines the structure for dynamic labels configuration
 type DynamicLabelsConfig struct {
 	// DynamicLabels is a map of dynamic label name -> dynamic label value -> list of matchers
-	DynamicLabels map[string]map[string][]LabelMatcherConfig `yaml:"dynamic_labels"`
+	DynamicLabels map[string]map[string][]string `yaml:"dynamic_labels"`
 }
 
 // UnmarshalYAML implements the yaml.Unmarshaler interface.

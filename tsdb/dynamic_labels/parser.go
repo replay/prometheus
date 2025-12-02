@@ -16,31 +16,18 @@ package dynamic_labels
 import (
 	"fmt"
 
-	"github.com/prometheus/prometheus/config"
 	"github.com/prometheus/prometheus/model/labels"
+	"github.com/prometheus/prometheus/promql/parser"
 )
 
 // ParseMatchers parses a list of LabelMatcherConfig into a list of labels.Matcher.
-func ParseMatchers(configs []config.LabelMatcherConfig) ([]*labels.Matcher, error) {
-	matchers := make([]*labels.Matcher, 0, len(configs))
-	for _, cfg := range configs {
-		var matchType labels.MatchType
-		switch cfg.MatchType {
-		case "", "=":
-			matchType = labels.MatchEqual
-		case "!=":
-			matchType = labels.MatchNotEqual
-		case "=~":
-			matchType = labels.MatchRegexp
-		case "!~":
-			matchType = labels.MatchNotRegexp
-		default:
-			return nil, fmt.Errorf("invalid match type %q for matcher %s=%s", cfg.MatchType, cfg.Name, cfg.Value)
-		}
+func ParseMatchers(configs []string) ([][]*labels.Matcher, error) {
+	matchers := make([][]*labels.Matcher, 0, len(configs))
+	for i, s := range configs {
+		m, err := parser.ParseMetricSelector(s)
 
-		m, err := labels.NewMatcher(matchType, cfg.Name, cfg.Value)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("parse matcher at index %d (%q): %w", i, s, err)
 		}
 		matchers = append(matchers, m)
 	}

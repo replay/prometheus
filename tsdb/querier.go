@@ -397,14 +397,16 @@ func PostingsForMatchers(ctx context.Context, ix IndexReader, ms ...*labels.Matc
 			var subIts []index.Postings
 
 			if m.Matches("") {
-				for val, matchers := range values {
-					if !m.Matches(val) {
-						// These series should be excluded
-						p, err := PostingsForMatchers(ctx, ix, matchers...)
-						if err != nil {
-							return nil, err
+				for val, matcherSet := range values {
+					for _, matchers := range matcherSet {
+						if !m.Matches(val) {
+							// These series should be excluded
+							p, err := PostingsForMatchers(ctx, ix, matchers...)
+							if err != nil {
+								return nil, err
+							}
+							notIts = append(notIts, p)
 						}
-						notIts = append(notIts, p)
 					}
 				}
 				if len(its) == 0 {
@@ -417,13 +419,15 @@ func PostingsForMatchers(ctx context.Context, ix IndexReader, ms ...*labels.Matc
 				}
 			} else {
 				// Matcher does NOT match empty.
-				for val, matchers := range values {
-					if m.Matches(val) {
-						p, err := PostingsForMatchers(ctx, ix, matchers...)
-						if err != nil {
-							return nil, err
+				for val, matcherSet := range values {
+					for _, matchers := range matcherSet {
+						if m.Matches(val) {
+							p, err := PostingsForMatchers(ctx, ix, matchers...)
+							if err != nil {
+								return nil, err
+							}
+							subIts = append(subIts, p)
 						}
-						subIts = append(subIts, p)
 					}
 				}
 				if len(subIts) > 0 {

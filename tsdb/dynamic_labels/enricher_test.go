@@ -54,8 +54,7 @@ func TestEnrichedSeriesSet(t *testing.T) {
 dynamic_labels:
   region:
     us-east-1:
-      - name: "zone"
-        value: "us-east-1a"
+      - '{zone="us-east-1a"}'
 `
 	require.NoError(t, os.WriteFile(filename, []byte(content), 0o666))
 	provider, err := NewFileRuleProvider(filename)

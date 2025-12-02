@@ -33,7 +33,7 @@ type RuleProvider interface {
 	// The outer map key is the dynamic label name.
 	// The inner map key is the dynamic label value.
 	// The value is a list of matchers that a series must match to get the dynamic label.
-	GetRules() map[string]map[string][]*labels.Matcher
+	GetRules() map[string]map[string][][]*labels.Matcher
 
 	// GetDynamicLabelsForSeries returns the dynamic labels that should be added to the series
 	// based on its intrinsic labels.
@@ -43,7 +43,7 @@ type RuleProvider interface {
 // FileRuleProvider implements RuleProvider using a YAML file.
 type FileRuleProvider struct {
 	mu       sync.RWMutex
-	rules    map[string]map[string][]*labels.Matcher
+	rules    map[string]map[string][][]*labels.Matcher
 	filename string
 	watcher  *fsnotify.Watcher
 	ctx      context.Context
@@ -55,7 +55,7 @@ type FileRuleProvider struct {
 func NewFileRuleProvider(filename string) (*FileRuleProvider, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &FileRuleProvider{
-		rules:    make(map[string]map[string][]*labels.Matcher),
+		rules:    make(map[string]map[string][][]*labels.Matcher),
 		filename: filename,
 		ctx:      ctx,
 		cancel:   cancel,
@@ -93,9 +93,9 @@ func (p *FileRuleProvider) Load(filename string) error {
 		return fmt.Errorf("parse dynamic labels file: %w", err)
 	}
 
-	rules := make(map[string]map[string][]*labels.Matcher)
+	rules := make(map[string]map[string][][]*labels.Matcher)
 	for labelName, valueRules := range cfg.DynamicLabels {
-		rules[labelName] = make(map[string][]*labels.Matcher)
+		rules[labelName] = make(map[string][][]*labels.Matcher)
 		for labelValue, matcherConfigs := range valueRules {
 			matchers, err := ParseMatchers(matcherConfigs)
 			if err != nil {
@@ -111,7 +111,7 @@ func (p *FileRuleProvider) Load(filename string) error {
 	return nil
 }
 
-func (p *FileRuleProvider) GetRules() map[string]map[string][]*labels.Matcher {
+func (p *FileRuleProvider) GetRules() map[string]map[string][][]*labels.Matcher {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.rules
@@ -122,21 +122,28 @@ func (p *FileRuleProvider) GetDynamicLabelsForSeries(seriesLabels labels.Labels)
 	defer p.mu.RUnlock()
 
 	var builder labels.ScratchBuilder
+RULES:
 	for name, values := range p.rules {
-		for value, matchers := range values {
-			matches := true
-			for _, m := range matchers {
-				val := seriesLabels.Get(m.Name)
-				if !m.Matches(val) {
-					matches = false
-					break
+		for value, matcherSets := range values {
+			for _, matcherSet := range matcherSets {
+				matches := true
+
+				for _, m := range matcherSet {
+					val := seriesLabels.Get(m.Name)
+					if !m.Matches(val) {
+						matches = false
+						break
+					}
 				}
-			}
-			if matches {
-				builder.Add(name, value)
+
+				if matches {
+					builder.Add(name, value)
+					continue RULES
+				}
 			}
 		}
 	}
+
 	builder.Sort()
 	return builder.Labels()
 }
