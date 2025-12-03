@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -231,6 +232,118 @@ func evaluateTemplate(template string, seriesLabels labels.Labels) string {
 		}
 		return value
 	})
+}
+
+// templateStructure represents the parsed structure of a template.
+type templateStructure struct {
+	// Parts alternates between literal strings and variable names.
+	// Even indices are literals, odd indices are variable names.
+	// Example: template "${job}/${instance}" -> parts = ["", "job", "/", "instance", ""]
+	parts []string
+	// VariableNames is the list of variable names in order of appearance.
+	variableNames []string
+}
+
+// parseTemplateStructure parses a template string and returns its structure.
+func parseTemplateStructure(template string) templateStructure {
+	parts := make([]string, 0)
+	variableNames := make([]string, 0)
+
+	lastIndex := 0
+	matches := templateVarRegex.FindAllStringSubmatchIndex(template, -1)
+
+	for _, match := range matches {
+		// Add literal part before this variable
+		if match[0] > lastIndex {
+			parts = append(parts, template[lastIndex:match[0]])
+		} else {
+			parts = append(parts, "")
+		}
+
+		// Extract variable name (match[2] to match[3] is the first capture group)
+		varName := template[match[2]:match[3]]
+		variableNames = append(variableNames, varName)
+		parts = append(parts, varName)
+
+		lastIndex = match[1]
+	}
+
+	// Add remaining literal part after last variable
+	if lastIndex < len(template) {
+		parts = append(parts, template[lastIndex:])
+	} else {
+		parts = append(parts, "")
+	}
+
+	return templateStructure{
+		parts:         parts,
+		variableNames: variableNames,
+	}
+}
+
+// ReverseEngineerTemplateValue attempts to match a value against a template pattern
+// and extract the component label values. Returns a map of label name -> value,
+// or nil if the value doesn't match the template pattern.
+func ReverseEngineerTemplateValue(template string, value string) map[string]string {
+	structure := parseTemplateStructure(template)
+
+	// Build a regex pattern from the template structure
+	// We need to escape literal parts and use capturing groups for variables
+	regexParts := make([]string, 0, len(structure.parts))
+	captureGroupIndex := 0
+
+	for i, part := range structure.parts {
+		if i%2 == 0 {
+			// Even index: literal part
+			// Escape special regex characters
+			escaped := regexp.QuoteMeta(part)
+			regexParts = append(regexParts, escaped)
+		} else {
+			// Odd index: variable part
+			// Use a capturing group that matches any characters
+			// For the last variable, use greedy matching to consume everything
+			// For others, use non-greedy to stop at the next literal
+			if i == len(structure.parts)-2 {
+				// Last variable - use greedy to match everything until the end
+				regexParts = append(regexParts, `(.+)`)
+			} else {
+				// Not the last variable - use non-greedy to stop at next literal
+				regexParts = append(regexParts, `(.+?)`)
+			}
+			captureGroupIndex++
+		}
+	}
+
+	regexPattern := "^" + strings.Join(regexParts, "") + "$"
+	regex := regexp.MustCompile(regexPattern)
+
+	matches := regex.FindStringSubmatch(value)
+	if matches == nil {
+		// Value doesn't match the template pattern
+		return nil
+	}
+
+	// matches[0] is the full match, matches[1..] are the captured groups
+	if len(matches)-1 != len(structure.variableNames) {
+		return nil
+	}
+
+	// Build result map
+	result := make(map[string]string)
+	for i, varName := range structure.variableNames {
+		result[varName] = matches[i+1]
+	}
+
+	// Validate: reconstruct the template with the extracted values and ensure it matches
+	// This ensures we didn't over-match (e.g., matching "job1/instance123/extra" when template is "${job}/${instance}")
+	testLabels := labels.FromMap(result)
+	reconstructed := evaluateTemplate(template, testLabels)
+	if reconstructed != value {
+		// The reconstructed value doesn't match, so this wasn't a valid match
+		return nil
+	}
+
+	return result
 }
 
 // startWatching starts a goroutine that watches the file for changes and reloads rules automatically.

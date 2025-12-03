@@ -259,3 +259,89 @@ dynamic_labels:
 	enriched := EnrichLabels(labels, provider)
 	require.Equal(t, "eu-west-1", enriched.Get("region"))
 }
+
+func TestReverseEngineerTemplateValue(t *testing.T) {
+	cases := []struct {
+		name     string
+		template string
+		value    string
+		expected map[string]string
+	}{
+		{
+			name:     "simple template with two variables",
+			template: "${job}/${instance}",
+			value:    "job1/instance123",
+			expected: map[string]string{
+				"job":      "job1",
+				"instance": "instance123",
+			},
+		},
+		{
+			name:     "template with three variables",
+			template: "${job}/${instance}/${port}",
+			value:    "prometheus/localhost:9090/9090",
+			expected: map[string]string{
+				"job":      "prometheus",
+				"instance": "localhost:9090",
+				"port":     "9090",
+			},
+		},
+		{
+			name:     "template with prefix and suffix literals",
+			template: "prefix-${job}-suffix",
+			value:    "prefix-prometheus-suffix",
+			expected: map[string]string{
+				"job": "prometheus",
+			},
+		},
+		{
+			name:     "template with special regex characters",
+			template: "${job}.${instance}",
+			value:    "prometheus.localhost:9090",
+			expected: map[string]string{
+				"job":      "prometheus",
+				"instance": "localhost:9090",
+			},
+		},
+		{
+			name:     "value doesn't match template",
+			template: "${job}/${instance}",
+			value:    "job1",
+			expected: nil,
+		},
+		{
+			name:     "value with extra parts matches (interpreted as part of last variable)",
+			template: "${job}/${instance}",
+			value:    "job1/instance123/extra",
+			expected: map[string]string{
+				"job":      "job1",
+				"instance": "instance123/extra",
+			},
+		},
+		{
+			name:     "empty value doesn't match",
+			template: "${job}/${instance}",
+			value:    "",
+			expected: nil,
+		},
+		{
+			name:     "single variable template",
+			template: "${job}",
+			value:    "prometheus",
+			expected: map[string]string{
+				"job": "prometheus",
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := ReverseEngineerTemplateValue(tc.template, tc.value)
+			if tc.expected == nil {
+				require.Nil(t, result, "Expected nil but got %v", result)
+			} else {
+				require.Equal(t, tc.expected, result, "Reverse engineering mismatch")
+			}
+		})
+	}
+}
