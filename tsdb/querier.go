@@ -398,29 +398,33 @@ func PostingsForMatchers(ctx context.Context, ix IndexReader, ms ...*labels.Matc
 		// Build a map: dynamic label name -> label value -> list of matcher sets
 		// This allows efficient lookup for query processing for static values
 		dynamicLabelMap := make(map[string]map[string][][]*labels.Matcher)
-		// Build a map: dynamic label name -> list of (template, rule matchers)
+		// Build a map: dynamic label name -> list of (template structure, template string, rule matchers)
 		// This allows lookup for template-based labels
 		templateLabelMap := make(map[string][]struct {
-			template string
-			matchers [][]*labels.Matcher
+			templateStructure *dynamic_labels.TemplateStructure
+			template          string
+			matchers          [][]*labels.Matcher
 		})
 
 		for _, rule := range rules {
 			for labelName, labelConfig := range rule.Labels {
 				if labelConfig.IsTemplate {
-					// Store template-based label configuration
+					// Store template-based label configuration with pre-parsed structure
 					if templateLabelMap[labelName] == nil {
 						templateLabelMap[labelName] = make([]struct {
-							template string
-							matchers [][]*labels.Matcher
+							templateStructure *dynamic_labels.TemplateStructure
+							template          string
+							matchers          [][]*labels.Matcher
 						}, 0)
 					}
 					templateLabelMap[labelName] = append(templateLabelMap[labelName], struct {
-						template string
-						matchers [][]*labels.Matcher
+						templateStructure *dynamic_labels.TemplateStructure
+						template          string
+						matchers          [][]*labels.Matcher
 					}{
-						template: labelConfig.TemplateValue,
-						matchers: rule.Matchers,
+						templateStructure: labelConfig.TemplateStructure,
+						template:          labelConfig.TemplateValue,
+						matchers:          rule.Matchers,
 					})
 				} else {
 					// Store static value configuration
@@ -481,7 +485,7 @@ func PostingsForMatchers(ctx context.Context, ix IndexReader, ms ...*labels.Matc
 
 					// Try each template to see if the queried value matches
 					for _, tmpl := range templates {
-						componentValues := dynamic_labels.ReverseEngineerTemplateValue(tmpl.template, queriedValue)
+						componentValues := dynamic_labels.ReverseEngineerTemplateValue(tmpl.templateStructure, tmpl.template, queriedValue)
 						if componentValues != nil {
 							// Successfully reverse-engineered! Create matchers for component labels
 							for _, matcherSet := range tmpl.matchers {

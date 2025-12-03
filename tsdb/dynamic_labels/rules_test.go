@@ -336,7 +336,9 @@ func TestReverseEngineerTemplateValue(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			result := ReverseEngineerTemplateValue(tc.template, tc.value)
+			// Parse the template structure for testing
+			structure := parseTemplateStructure(tc.template)
+			result := ReverseEngineerTemplateValue(&structure, tc.template, tc.value)
 			if tc.expected == nil {
 				require.Nil(t, result, "Expected nil but got %v", result)
 			} else {

@@ -37,6 +37,9 @@ type LabelValueConfig struct {
 	TemplateValue string
 	// IsTemplate indicates whether this is a template (true) or static value (false).
 	IsTemplate bool
+	// TemplateStructure is the parsed structure of the template (only set if IsTemplate is true).
+	// This is pre-parsed during config load to avoid parsing on every query.
+	TemplateStructure *TemplateStructure
 }
 
 // Rule represents a single dynamic label rule.
@@ -144,9 +147,13 @@ func (p *FileRuleProvider) Load(filename string) error {
 					IsTemplate:  false,
 				}
 			} else {
+				// Parse the template structure once during config load
+				templateStr := *labelConfig.SetValueFromLabels
+				parsedStructure := parseTemplateStructure(templateStr)
 				labelConfigs[labelName] = LabelValueConfig{
-					TemplateValue: *labelConfig.SetValueFromLabels,
-					IsTemplate:    true,
+					TemplateValue:     templateStr,
+					IsTemplate:        true,
+					TemplateStructure: &parsedStructure,
 				}
 			}
 		}
@@ -234,8 +241,8 @@ func evaluateTemplate(template string, seriesLabels labels.Labels) string {
 	})
 }
 
-// templateStructure represents the parsed structure of a template.
-type templateStructure struct {
+// TemplateStructure represents the parsed structure of a template.
+type TemplateStructure struct {
 	// Parts alternates between literal strings and variable names.
 	// Even indices are literals, odd indices are variable names.
 	// Example: template "${job}/${instance}" -> parts = ["", "job", "/", "instance", ""]
@@ -245,7 +252,7 @@ type templateStructure struct {
 }
 
 // parseTemplateStructure parses a template string and returns its structure.
-func parseTemplateStructure(template string) templateStructure {
+func parseTemplateStructure(template string) TemplateStructure {
 	parts := make([]string, 0)
 	variableNames := make([]string, 0)
 
@@ -275,7 +282,7 @@ func parseTemplateStructure(template string) templateStructure {
 		parts = append(parts, "")
 	}
 
-	return templateStructure{
+	return TemplateStructure{
 		parts:         parts,
 		variableNames: variableNames,
 	}
@@ -284,8 +291,9 @@ func parseTemplateStructure(template string) templateStructure {
 // ReverseEngineerTemplateValue attempts to match a value against a template pattern
 // and extract the component label values. Returns a map of label name -> value,
 // or nil if the value doesn't match the template pattern.
-func ReverseEngineerTemplateValue(template string, value string) map[string]string {
-	structure := parseTemplateStructure(template)
+// The templateStructure should be pre-parsed (typically from LabelValueConfig.TemplateStructure).
+func ReverseEngineerTemplateValue(templateStructure *TemplateStructure, template string, value string) map[string]string {
+	structure := templateStructure
 
 	// Build a regex pattern from the template structure
 	// We need to escape literal parts and use capturing groups for variables
