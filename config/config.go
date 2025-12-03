@@ -1686,10 +1686,18 @@ func sanitizeAttributes(attributes []string, adjective string) error {
 	return err
 }
 
+// DynamicLabelRule defines a single rule for dynamic labels.
+type DynamicLabelRule struct {
+	// Matchers is a list of matcher strings. If any matcher matches, the rule applies (OR logic).
+	Matchers []string `yaml:"matchers"`
+	// Labels defines which labels should be assigned to matching series.
+	Labels map[string]string `yaml:"labels"`
+}
+
 // DynamicLabelsConfig defines the structure for dynamic labels configuration
 type DynamicLabelsConfig struct {
-	// DynamicLabels is a map of dynamic label name -> dynamic label value -> list of matchers
-	DynamicLabels map[string]map[string][]string `yaml:"dynamic_labels"`
+	// DynamicLabels is a list of rules. Each rule has matchers (OR'd together) and labels to apply.
+	DynamicLabels []DynamicLabelRule `yaml:"dynamic_labels"`
 }
 
 // UnmarshalYAML implements the yaml.Unmarshaler interface.

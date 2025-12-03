@@ -27,13 +27,19 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
+// Rule represents a single dynamic label rule.
+type Rule struct {
+	// Matchers is a list of matcher sets. If any matcher set matches, the rule applies (OR logic).
+	// Each matcher set is a list of matchers that must all match (AND logic within a set).
+	Matchers [][]*labels.Matcher
+	// Labels defines which labels should be assigned to matching series.
+	Labels map[string]string
+}
+
 // RuleProvider provides access to dynamic label rules.
 type RuleProvider interface {
 	// GetRules returns all dynamic label rules.
-	// The outer map key is the dynamic label name.
-	// The inner map key is the dynamic label value.
-	// The value is a list of matchers that a series must match to get the dynamic label.
-	GetRules() map[string]map[string][][]*labels.Matcher
+	GetRules() []Rule
 
 	// GetDynamicLabelsForSeries returns the dynamic labels that should be added to the series
 	// based on its intrinsic labels.
@@ -43,7 +49,7 @@ type RuleProvider interface {
 // FileRuleProvider implements RuleProvider using a YAML file.
 type FileRuleProvider struct {
 	mu       sync.RWMutex
-	rules    map[string]map[string][][]*labels.Matcher
+	rules    []Rule
 	filename string
 	watcher  *fsnotify.Watcher
 	ctx      context.Context
@@ -55,7 +61,7 @@ type FileRuleProvider struct {
 func NewFileRuleProvider(filename string) (*FileRuleProvider, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &FileRuleProvider{
-		rules:    make(map[string]map[string][][]*labels.Matcher),
+		rules:    []Rule{},
 		filename: filename,
 		ctx:      ctx,
 		cancel:   cancel,
@@ -93,16 +99,26 @@ func (p *FileRuleProvider) Load(filename string) error {
 		return fmt.Errorf("parse dynamic labels file: %w", err)
 	}
 
-	rules := make(map[string]map[string][][]*labels.Matcher)
-	for labelName, valueRules := range cfg.DynamicLabels {
-		rules[labelName] = make(map[string][][]*labels.Matcher)
-		for labelValue, matcherConfigs := range valueRules {
-			matchers, err := ParseMatchers(matcherConfigs)
-			if err != nil {
-				return fmt.Errorf("parse matchers for dynamic label %q=%q: %w", labelName, labelValue, err)
-			}
-			rules[labelName][labelValue] = matchers
+	rules := make([]Rule, 0, len(cfg.DynamicLabels))
+	for i, ruleConfig := range cfg.DynamicLabels {
+		if len(ruleConfig.Labels) == 0 {
+			return fmt.Errorf("rule at index %d has no labels", i)
 		}
+
+		// Parse each matcher string into a set of matchers
+		matcherSets := make([][]*labels.Matcher, 0, len(ruleConfig.Matchers))
+		for j, matcherStr := range ruleConfig.Matchers {
+			matchers, err := ParseMatcherString(matcherStr)
+			if err != nil {
+				return fmt.Errorf("parse matcher at index %d in rule %d (%q): %w", j, i, matcherStr, err)
+			}
+			matcherSets = append(matcherSets, matchers)
+		}
+
+		rules = append(rules, Rule{
+			Matchers: matcherSets,
+			Labels:   ruleConfig.Labels,
+		})
 	}
 
 	p.mu.Lock()
@@ -111,10 +127,13 @@ func (p *FileRuleProvider) Load(filename string) error {
 	return nil
 }
 
-func (p *FileRuleProvider) GetRules() map[string]map[string][][]*labels.Matcher {
+func (p *FileRuleProvider) GetRules() []Rule {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return p.rules
+	// Return a copy to prevent external modification
+	rules := make([]Rule, len(p.rules))
+	copy(rules, p.rules)
+	return rules
 }
 
 func (p *FileRuleProvider) GetDynamicLabelsForSeries(seriesLabels labels.Labels) labels.Labels {
@@ -122,24 +141,31 @@ func (p *FileRuleProvider) GetDynamicLabelsForSeries(seriesLabels labels.Labels)
 	defer p.mu.RUnlock()
 
 	var builder labels.ScratchBuilder
-RULES:
-	for name, values := range p.rules {
-		for value, matcherSets := range values {
-			for _, matcherSet := range matcherSets {
-				matches := true
 
-				for _, m := range matcherSet {
-					val := seriesLabels.Get(m.Name)
-					if !m.Matches(val) {
-						matches = false
-						break
-					}
+	// Iterate through each rule
+	for _, rule := range p.rules {
+		// Check if any matcher set matches (OR logic)
+		ruleMatches := false
+		for _, matcherSet := range rule.Matchers {
+			// All matchers in a set must match (AND logic)
+			setMatches := true
+			for _, m := range matcherSet {
+				val := seriesLabels.Get(m.Name)
+				if !m.Matches(val) {
+					setMatches = false
+					break
 				}
+			}
+			if setMatches {
+				ruleMatches = true
+				break
+			}
+		}
 
-				if matches {
-					builder.Add(name, value)
-					continue RULES
-				}
+		// If the rule matches, add all its labels
+		if ruleMatches {
+			for name, value := range rule.Labels {
+				builder.Add(name, value)
 			}
 		}
 	}

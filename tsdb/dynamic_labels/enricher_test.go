@@ -52,9 +52,10 @@ func TestEnrichedSeriesSet(t *testing.T) {
 	// Reuse content from rules_test
 	content := `
 dynamic_labels:
-  region:
-    us-east-1:
+  - matchers:
       - '{zone="us-east-1a"}'
+    labels:
+      region: us-east-1
 `
 	require.NoError(t, os.WriteFile(filename, []byte(content), 0o666))
 	provider, err := NewFileRuleProvider(filename)

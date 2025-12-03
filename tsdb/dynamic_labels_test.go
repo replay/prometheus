@@ -27,10 +27,10 @@ import (
 
 // mockRuleProvider implements dynamic_labels.RuleProvider
 type mockRuleProvider struct {
-	rules map[string]map[string][]*labels.Matcher
+	rules []dynamic_labels.Rule
 }
 
-func (m *mockRuleProvider) GetRules() map[string]map[string][]*labels.Matcher {
+func (m *mockRuleProvider) GetRules() []dynamic_labels.Rule {
 	return m.rules
 }
 
@@ -42,14 +42,26 @@ func (m *mockRuleProvider) GetDynamicLabelsForSeries(seriesLabels labels.Labels)
 func TestPostingsForMatchers_DynamicLabels(t *testing.T) {
 	// Define rules: region="us-east-1" -> zone="us-east-1a" AND cluster="prod"
 	//               region="eu-west-1" -> zone="eu-west-1b"
-	rules := map[string]map[string][]*labels.Matcher{
-		"region": {
-			"us-east-1": {
-				labels.MustNewMatcher(labels.MatchEqual, "zone", "us-east-1a"),
-				labels.MustNewMatcher(labels.MatchEqual, "cluster", "prod"),
+	rules := []dynamic_labels.Rule{
+		{
+			Matchers: [][]*labels.Matcher{
+				{
+					labels.MustNewMatcher(labels.MatchEqual, "zone", "us-east-1a"),
+					labels.MustNewMatcher(labels.MatchEqual, "cluster", "prod"),
+				},
 			},
-			"eu-west-1": {
-				labels.MustNewMatcher(labels.MatchEqual, "zone", "eu-west-1b"),
+			Labels: map[string]string{
+				"region": "us-east-1",
+			},
+		},
+		{
+			Matchers: [][]*labels.Matcher{
+				{
+					labels.MustNewMatcher(labels.MatchEqual, "zone", "eu-west-1b"),
+				},
+			},
+			Labels: map[string]string{
+				"region": "eu-west-1",
 			},
 		},
 	}

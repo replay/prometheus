@@ -20,7 +20,18 @@ import (
 	"github.com/prometheus/prometheus/promql/parser"
 )
 
+// ParseMatcherString parses a single matcher string (metric selector) into a list of labels.Matcher.
+// The string can contain multiple matchers, e.g., '{version="go1.25.4",instance="localhost:9090"}'.
+func ParseMatcherString(matcherStr string) ([]*labels.Matcher, error) {
+	matchers, err := parser.ParseMetricSelector(matcherStr)
+	if err != nil {
+		return nil, fmt.Errorf("parse matcher string %q: %w", matcherStr, err)
+	}
+	return matchers, nil
+}
+
 // ParseMatchers parses a list of LabelMatcherConfig into a list of labels.Matcher.
+// Deprecated: Use ParseMatcherString for the new format.
 func ParseMatchers(configs []string) ([][]*labels.Matcher, error) {
 	matchers := make([][]*labels.Matcher, 0, len(configs))
 	for i, s := range configs {

@@ -229,8 +229,15 @@ func PostingsForMatchers(ctx context.Context, ix IndexReader, ms ...*labels.Matc
 	if ruleProviderGetter, ok := ix.(ruleProviderGetter); ok {
 		if ruleProvider := ruleProviderGetter.RuleProvider(); ruleProvider != nil {
 			rules := ruleProvider.GetRules()
+			// Build a map of dynamic label names for quick lookup
+			dynamicLabelNames := make(map[string]bool)
+			for _, rule := range rules {
+				for labelName := range rule.Labels {
+					dynamicLabelNames[labelName] = true
+				}
+			}
 			for _, m := range ms {
-				if _, ok := rules[m.Name]; ok {
+				if dynamicLabelNames[m.Name] {
 					dynamicMs = append(dynamicMs, m)
 				} else {
 					staticMs = append(staticMs, m)
@@ -388,17 +395,33 @@ func PostingsForMatchers(ctx context.Context, ix IndexReader, ms ...*labels.Matc
 		ruleProvider := ix.(ruleProviderGetter).RuleProvider()
 		rules := ruleProvider.GetRules()
 
+		// Build a map: dynamic label name -> label value -> list of matcher sets
+		// This allows efficient lookup for query processing
+		dynamicLabelMap := make(map[string]map[string][][]*labels.Matcher)
+		for _, rule := range rules {
+			for labelName, labelValue := range rule.Labels {
+				if dynamicLabelMap[labelName] == nil {
+					dynamicLabelMap[labelName] = make(map[string][][]*labels.Matcher)
+				}
+				if dynamicLabelMap[labelName][labelValue] == nil {
+					dynamicLabelMap[labelName][labelValue] = make([][]*labels.Matcher, 0)
+				}
+				// Add all matcher sets from this rule for this label value
+				dynamicLabelMap[labelName][labelValue] = append(dynamicLabelMap[labelName][labelValue], rule.Matchers...)
+			}
+		}
+
 		for _, m := range dynamicMs {
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
 
-			values := rules[m.Name]
+			values := dynamicLabelMap[m.Name]
 			var subIts []index.Postings
 
 			if m.Matches("") {
-				for val, matcherSet := range values {
-					for _, matchers := range matcherSet {
+				for val, matcherSets := range values {
+					for _, matchers := range matcherSets {
 						if !m.Matches(val) {
 							// These series should be excluded
 							p, err := PostingsForMatchers(ctx, ix, matchers...)
@@ -419,8 +442,8 @@ func PostingsForMatchers(ctx context.Context, ix IndexReader, ms ...*labels.Matc
 				}
 			} else {
 				// Matcher does NOT match empty.
-				for val, matcherSet := range values {
-					for _, matchers := range matcherSet {
+				for val, matcherSets := range values {
+					for _, matchers := range matcherSets {
 						if m.Matches(val) {
 							p, err := PostingsForMatchers(ctx, ix, matchers...)
 							if err != nil {

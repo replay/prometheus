@@ -29,14 +29,19 @@ func TestFileRuleProvider(t *testing.T) {
 
 	content := `
 dynamic_labels:
-  region:
-    us-east-1:
+  - matchers:
       - '{zone="us-east-1a", cluster="prod"}'
-    eu-west-1:
+    labels:
+      region: us-east-1
+  - matchers:
       - '{zone=~"eu-west-1.*"}'
-    eu-central-0:
+    labels:
+      region: eu-west-1
+  - matchers:
       - '{zone="eu-central-0a"}'
       - '{zone="eu-central-0b"}'
+    labels:
+      region: eu-central-0
 `
 	err := os.WriteFile(filename, []byte(content), 0o666)
 	require.NoError(t, err)
@@ -46,8 +51,17 @@ dynamic_labels:
 
 	// Test GetRules
 	rules := provider.GetRules()
-	require.Len(t, rules, 1)
-	require.Len(t, rules["region"], 3)
+	require.Len(t, rules, 3)
+	// Check that each rule has the expected labels
+	regionLabels := make(map[string]bool)
+	for _, rule := range rules {
+		if region, ok := rule.Labels["region"]; ok {
+			regionLabels[region] = true
+		}
+	}
+	require.True(t, regionLabels["us-east-1"])
+	require.True(t, regionLabels["eu-west-1"])
+	require.True(t, regionLabels["eu-central-0"])
 
 	// Test GetDynamicLabelsForSeries
 	cases := []struct {
@@ -115,9 +129,10 @@ func TestFileRuleProviderRuntimeReload(t *testing.T) {
 	// Initial content
 	initialContent := `
 dynamic_labels:
-  region:
-    us-east-1:
+  - matchers:
       - '{zone="us-east-1a"}'
+    labels:
+      region: us-east-1
 `
 	err := os.WriteFile(filename, []byte(initialContent), 0o666)
 	require.NoError(t, err)
@@ -129,20 +144,23 @@ dynamic_labels:
 	// Verify initial rules
 	rules := provider.GetRules()
 	require.Len(t, rules, 1)
-	require.Len(t, rules["region"], 1)
-	require.Contains(t, rules["region"], "us-east-1")
+	require.Equal(t, "us-east-1", rules[0].Labels["region"])
 
 	// Update the file with new rules
 	updatedContent := `
 dynamic_labels:
-  region:
-    us-east-1:
+  - matchers:
       - '{zone="us-east-1a"}'
-    eu-west-1:
+    labels:
+      region: us-east-1
+  - matchers:
       - '{zone=~"eu-west-1.*"}'
-  environment:
-    production:
+    labels:
+      region: eu-west-1
+  - matchers:
       - '{cluster="prod"}'
+    labels:
+      environment: production
 `
 	err = os.WriteFile(filename, []byte(updatedContent), 0o666)
 	require.NoError(t, err)
@@ -153,12 +171,26 @@ dynamic_labels:
 
 	// Verify updated rules
 	rules = provider.GetRules()
-	require.Len(t, rules, 2)           // region and environment
-	require.Len(t, rules["region"], 2) // us-east-1 and eu-west-1
-	require.Contains(t, rules["region"], "us-east-1")
-	require.Contains(t, rules["region"], "eu-west-1")
-	require.Len(t, rules["environment"], 1)
-	require.Contains(t, rules["environment"], "production")
+	require.Len(t, rules, 3) // 3 rules total
+	// Check that we have rules for both region and environment
+	hasRegionEast := false
+	hasRegionWest := false
+	hasEnvProd := false
+	for _, rule := range rules {
+		if region, ok := rule.Labels["region"]; ok {
+			if region == "us-east-1" {
+				hasRegionEast = true
+			} else if region == "eu-west-1" {
+				hasRegionWest = true
+			}
+		}
+		if env, ok := rule.Labels["environment"]; ok && env == "production" {
+			hasEnvProd = true
+		}
+	}
+	require.True(t, hasRegionEast)
+	require.True(t, hasRegionWest)
+	require.True(t, hasEnvProd)
 
 	// Test that the new rules are applied
 	labels := labels.FromStrings("zone", "eu-west-1b", "app", "test")
