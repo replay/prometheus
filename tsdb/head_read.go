@@ -79,6 +79,12 @@ func (h *headIndexReader) LabelValues(ctx context.Context, name string, hints *s
 		return []string{}, nil
 	}
 
+	if dynValues, err := getDynamicLabelValues(ctx, h, h.head.opts.RuleProvider, name, matchers...); err != nil {
+		return nil, err
+	} else if dynValues != nil {
+		return dynValues, nil
+	}
+
 	if len(matchers) == 0 {
 		return h.head.postings.LabelValues(ctx, name, hints), nil
 	}
@@ -96,6 +102,24 @@ func (h *headIndexReader) LabelNames(ctx context.Context, matchers ...*labels.Ma
 	if len(matchers) == 0 {
 		labelNames := h.head.postings.LabelNames()
 		slices.Sort(labelNames)
+
+		if h.head.opts.RuleProvider != nil {
+			dynNames := h.head.opts.RuleProvider.GetDynamicLabelNames()
+			if len(dynNames) > 0 {
+				unique := make(map[string]struct{}, len(labelNames)+len(dynNames))
+				for _, n := range labelNames {
+					unique[n] = struct{}{}
+				}
+				for _, n := range dynNames {
+					unique[n] = struct{}{}
+				}
+				labelNames = make([]string, 0, len(unique))
+				for n := range unique {
+					labelNames = append(labelNames, n)
+				}
+				slices.Sort(labelNames)
+			}
+		}
 		return labelNames, nil
 	}
 
@@ -274,11 +298,19 @@ func (h *headIndexReader) LabelValueFor(_ context.Context, id storage.SeriesRef,
 	}
 
 	value := memSeries.labels().Get(label)
-	if value == "" {
-		return "", storage.ErrNotFound
+	if value != "" {
+		return value, nil
 	}
 
-	return value, nil
+	if h.head.opts.RuleProvider != nil {
+		dyn := h.head.opts.RuleProvider.GetDynamicLabelsForSeries(memSeries.labels())
+		dynVal := dyn.Get(label)
+		if dynVal != "" {
+			return dynVal, nil
+		}
+	}
+
+	return "", storage.ErrNotFound
 }
 
 // LabelNamesFor returns all the label names for the series referred to by the postings.
@@ -297,7 +329,16 @@ func (h *headIndexReader) LabelNamesFor(ctx context.Context, series index.Postin
 			// when series was garbage collected after the caller got the series IDs.
 			continue
 		}
-		memSeries.labels().Range(func(lbl labels.Label) {
+		lbls := memSeries.labels()
+
+		if h.head.opts.RuleProvider != nil {
+			dyn := h.head.opts.RuleProvider.GetDynamicLabelsForSeries(lbls)
+			dyn.Range(func(l labels.Label) {
+				namesMap[l.Name] = struct{}{}
+			})
+		}
+
+		lbls.Range(func(lbl labels.Label) {
 			namesMap[lbl.Name] = struct{}{}
 		})
 	}

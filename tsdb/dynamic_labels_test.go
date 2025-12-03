@@ -39,6 +39,20 @@ func (m *mockRuleProvider) GetDynamicLabelsForSeries(seriesLabels labels.Labels)
 	return labels.Labels{}
 }
 
+func (m *mockRuleProvider) GetDynamicLabelNames() []string {
+	uniqueNames := make(map[string]struct{})
+	for _, rule := range m.rules {
+		for name := range rule.Labels {
+			uniqueNames[name] = struct{}{}
+		}
+	}
+	var names []string
+	for name := range uniqueNames {
+		names = append(names, name)
+	}
+	return names
+}
+
 func TestPostingsForMatchers_DynamicLabels(t *testing.T) {
 	// Define rules: region="us-east-1" -> zone="us-east-1a" AND cluster="prod"
 	//               region="eu-west-1" -> zone="eu-west-1b"

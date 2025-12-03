@@ -213,6 +213,99 @@ func selectChunkSeriesSet(ctx context.Context, sortSeries bool, hints *storage.S
 	return css
 }
 
+func getDynamicLabelValues(ctx context.Context, r IndexReader, rp dynamic_labels.RuleProvider, name string, matchers ...*labels.Matcher) ([]string, error) {
+	if rp == nil {
+		return nil, nil
+	}
+
+	isDynamic := false
+	for _, n := range rp.GetDynamicLabelNames() {
+		if n == name {
+			isDynamic = true
+			break
+		}
+	}
+
+	if !isDynamic {
+		return nil, nil
+	}
+
+	// It is a dynamic label. We need to iterate matching series.
+	// If no matchers, we match all series.
+	if len(matchers) == 0 {
+		matchers = []*labels.Matcher{labels.MustNewMatcher(labels.MatchRegexp, labels.MetricName, ".*")}
+	}
+
+	p, err := PostingsForMatchers(ctx, r, matchers...)
+	if err != nil {
+		return nil, err
+	}
+
+	// Collect unique values
+	values := make(map[string]struct{})
+	var builder labels.ScratchBuilder
+	var chks []chunks.Meta
+
+	for p.Next() {
+		if err := r.Series(p.At(), &builder, &chks); err != nil {
+			// If series not found (race in head), skip
+			continue
+		}
+		lbls := builder.Labels()
+
+		dynamicLabels := rp.GetDynamicLabelsForSeries(lbls)
+		val := dynamicLabels.Get(name)
+		if val == "" {
+			val = lbls.Get(name)
+		}
+		if val != "" {
+			values[val] = struct{}{}
+		}
+	}
+
+	if p.Err() != nil {
+		return nil, p.Err()
+	}
+
+	res := make([]string, 0, len(values))
+	for v := range values {
+		res = append(res, v)
+	}
+	slices.Sort(res)
+	return res, nil
+}
+
+func getGlobalDynamicLabelNames(ctx context.Context, r IndexReader, rp dynamic_labels.RuleProvider) ([]string, error) {
+	names, err := r.LabelNames(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	if rp == nil {
+		return names, nil
+	}
+
+	dynNames := rp.GetDynamicLabelNames()
+	if len(dynNames) == 0 {
+		return names, nil
+	}
+
+	unique := make(map[string]struct{}, len(names)+len(dynNames))
+	for _, n := range names {
+		unique[n] = struct{}{}
+	}
+	for _, n := range dynNames {
+		unique[n] = struct{}{}
+	}
+
+	res := make([]string, 0, len(unique))
+	for n := range unique {
+		res = append(res, n)
+	}
+	slices.Sort(res)
+	return res, nil
+}
+
 // PostingsForMatchers assembles a single postings iterator against the index reader
 // based on the given matchers. The resulting postings are not ordered by series.
 func PostingsForMatchers(ctx context.Context, ix IndexReader, ms ...*labels.Matcher) (index.Postings, error) {
@@ -470,18 +563,14 @@ func PostingsForMatchers(ctx context.Context, ix IndexReader, ms ...*labels.Matc
 					// which is expensive. This is a limitation of template-based labels with "not" matchers.
 				} else {
 					// Try to reverse-engineer the queried value against each template
-					queriedValue := m.Value
-					if m.Type == labels.MatchEqual {
-						queriedValue = m.Value
-					} else if m.Type == labels.MatchRegexp {
+					if m.Type != labels.MatchEqual {
 						// For regexp matchers on template labels, we can't easily reverse-engineer
 						// This is a limitation - we'd need to check all series
 						// For now, skip template-based regexp matching
-						continue
-					} else {
 						// Other matcher types not supported for templates
 						continue
 					}
+					queriedValue := m.Value
 
 					// Try each template to see if the queried value matches
 					for _, tmpl := range templates {

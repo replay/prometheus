@@ -500,6 +500,12 @@ func (r blockIndexReader) SortedLabelValues(ctx context.Context, name string, hi
 }
 
 func (r blockIndexReader) LabelValues(ctx context.Context, name string, hints *storage.LabelHints, matchers ...*labels.Matcher) ([]string, error) {
+	if dynValues, err := getDynamicLabelValues(ctx, r, r.b.ruleProvider, name, matchers...); err != nil {
+		return nil, err
+	} else if dynValues != nil {
+		return dynValues, nil
+	}
+
 	if len(matchers) == 0 {
 		st, err := r.ir.LabelValues(ctx, name, hints)
 		if err != nil {
@@ -508,15 +514,61 @@ func (r blockIndexReader) LabelValues(ctx context.Context, name string, hints *s
 		return st, nil
 	}
 
-	return labelValuesWithMatchers(ctx, r.ir, name, hints, matchers...)
+	return labelValuesWithMatchers(ctx, r, name, hints, matchers...)
 }
 
 func (r blockIndexReader) LabelNames(ctx context.Context, matchers ...*labels.Matcher) ([]string, error) {
 	if len(matchers) == 0 {
-		return r.b.LabelNames(ctx)
+		return getGlobalDynamicLabelNames(ctx, r.ir, r.b.ruleProvider)
 	}
 
-	return labelNamesWithMatchers(ctx, r.ir, matchers...)
+	return labelNamesWithMatchers(ctx, r, matchers...)
+}
+
+// LabelNamesFor returns all the label names for the series referred to by the postings.
+// The names returned are sorted.
+func (r blockIndexReader) LabelNamesFor(ctx context.Context, postings index.Postings) ([]string, error) {
+	if r.b.ruleProvider == nil {
+		return r.ir.LabelNamesFor(ctx, postings)
+	}
+
+	namesMap := make(map[string]struct{})
+	var builder labels.ScratchBuilder
+	var chks []chunks.Meta
+
+	for postings.Next() {
+		if err := r.ir.Series(postings.At(), &builder, &chks); err != nil {
+			if errors.Is(err, storage.ErrNotFound) {
+				continue
+			}
+			return nil, fmt.Errorf("block: %s: %w", r.b.Meta().ULID, err)
+		}
+		lbls := builder.Labels()
+
+		dyn := r.b.ruleProvider.GetDynamicLabelsForSeries(lbls)
+		dyn.Range(func(l labels.Label) {
+			namesMap[l.Name] = struct{}{}
+		})
+
+		lbls.Range(func(l labels.Label) {
+			namesMap[l.Name] = struct{}{}
+		})
+	}
+
+	if err := postings.Err(); err != nil {
+		return nil, err
+	}
+
+	names := make([]string, 0, len(namesMap))
+	for name := range namesMap {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return names, nil
+}
+
+func (r blockIndexReader) RuleProvider() dynamic_labels.RuleProvider {
+	return r.b.ruleProvider
 }
 
 func (r blockIndexReader) Postings(ctx context.Context, name string, values ...string) (index.Postings, error) {
@@ -557,13 +609,32 @@ func (r blockIndexReader) Close() error {
 
 // LabelValueFor returns label value for the given label name in the series referred to by ID.
 func (r blockIndexReader) LabelValueFor(ctx context.Context, id storage.SeriesRef, label string) (string, error) {
-	return r.ir.LabelValueFor(ctx, id, label)
-}
+	val, err := r.ir.LabelValueFor(ctx, id, label)
+	if err == nil {
+		return val, nil
+	}
+	// If error is not ErrNotFound, return it.
+	if !errors.Is(err, storage.ErrNotFound) {
+		return val, err
+	}
 
-// LabelNamesFor returns all the label names for the series referred to by the postings.
-// The names returned are sorted.
-func (r blockIndexReader) LabelNamesFor(ctx context.Context, postings index.Postings) ([]string, error) {
-	return r.ir.LabelNamesFor(ctx, postings)
+	// If not found in index, check dynamic labels
+	if r.b.ruleProvider != nil {
+		var builder labels.ScratchBuilder
+		var chks []chunks.Meta
+		// We ignore series lookup error here and return original error if series lookup fails,
+		// assuming if LabelValueFor failed maybe Series will too or we just can't enrich.
+		if errSeries := r.ir.Series(id, &builder, &chks); errSeries == nil {
+			lbls := builder.Labels()
+			dyn := r.b.ruleProvider.GetDynamicLabelsForSeries(lbls)
+			dynVal := dyn.Get(label)
+			if dynVal != "" {
+				return dynVal, nil
+			}
+		}
+	}
+
+	return val, err
 }
 
 type blockTombstoneReader struct {
