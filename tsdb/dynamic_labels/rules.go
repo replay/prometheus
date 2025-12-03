@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sync"
 	"time"
 
@@ -27,13 +28,24 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
+// LabelValueConfig defines how a dynamic label value is determined.
+type LabelValueConfig struct {
+	// StaticValue is a static string value for the label.
+	StaticValue string
+	// TemplateValue is a template string that uses ${label_name} syntax to reference other labels.
+	TemplateValue string
+	// IsTemplate indicates whether this is a template (true) or static value (false).
+	IsTemplate bool
+}
+
 // Rule represents a single dynamic label rule.
 type Rule struct {
 	// Matchers is a list of matcher sets. If any matcher set matches, the rule applies (OR logic).
 	// Each matcher set is a list of matchers that must all match (AND logic within a set).
 	Matchers [][]*labels.Matcher
 	// Labels defines which labels should be assigned to matching series.
-	Labels map[string]string
+	// Each label has a value configuration (static or template).
+	Labels map[string]LabelValueConfig
 }
 
 // RuleProvider provides access to dynamic label rules.
@@ -115,9 +127,32 @@ func (p *FileRuleProvider) Load(filename string) error {
 			matcherSets = append(matcherSets, matchers)
 		}
 
+		// Convert label configurations
+		labelConfigs := make(map[string]LabelValueConfig)
+		for labelName, labelConfig := range ruleConfig.Labels {
+			if labelConfig.SetValueStatic != nil && labelConfig.SetValueFromLabels != nil {
+				return fmt.Errorf("rule at index %d, label %q: cannot specify both set_value_static and set_value_from_labels", i, labelName)
+			}
+			if labelConfig.SetValueStatic == nil && labelConfig.SetValueFromLabels == nil {
+				return fmt.Errorf("rule at index %d, label %q: must specify either set_value_static or set_value_from_labels", i, labelName)
+			}
+
+			if labelConfig.SetValueStatic != nil {
+				labelConfigs[labelName] = LabelValueConfig{
+					StaticValue: *labelConfig.SetValueStatic,
+					IsTemplate:  false,
+				}
+			} else {
+				labelConfigs[labelName] = LabelValueConfig{
+					TemplateValue: *labelConfig.SetValueFromLabels,
+					IsTemplate:    true,
+				}
+			}
+		}
+
 		rules = append(rules, Rule{
 			Matchers: matcherSets,
-			Labels:   ruleConfig.Labels,
+			Labels:   labelConfigs,
 		})
 	}
 
@@ -164,7 +199,14 @@ func (p *FileRuleProvider) GetDynamicLabelsForSeries(seriesLabels labels.Labels)
 
 		// If the rule matches, add all its labels
 		if ruleMatches {
-			for name, value := range rule.Labels {
+			for name, valueConfig := range rule.Labels {
+				var value string
+				if valueConfig.IsTemplate {
+					// Evaluate template by replacing ${label_name} with actual label values
+					value = evaluateTemplate(valueConfig.TemplateValue, seriesLabels)
+				} else {
+					value = valueConfig.StaticValue
+				}
 				builder.Add(name, value)
 			}
 		}
@@ -172,6 +214,23 @@ func (p *FileRuleProvider) GetDynamicLabelsForSeries(seriesLabels labels.Labels)
 
 	builder.Sort()
 	return builder.Labels()
+}
+
+// evaluateTemplate replaces ${label_name} patterns in the template with actual label values.
+// If a referenced label doesn't exist, the ${label_name} pattern is left as-is.
+var templateVarRegex = regexp.MustCompile(`\$\{([^}]+)\}`)
+
+func evaluateTemplate(template string, seriesLabels labels.Labels) string {
+	return templateVarRegex.ReplaceAllStringFunc(template, func(match string) string {
+		// Extract label name from ${label_name}
+		labelName := templateVarRegex.FindStringSubmatch(match)[1]
+		value := seriesLabels.Get(labelName)
+		if value == "" {
+			// If label doesn't exist, return the original pattern
+			return match
+		}
+		return value
+	})
 }
 
 // startWatching starts a goroutine that watches the file for changes and reloads rules automatically.

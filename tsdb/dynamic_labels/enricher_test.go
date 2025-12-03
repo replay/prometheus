@@ -55,7 +55,8 @@ dynamic_labels:
   - matchers:
       - '{zone="us-east-1a"}'
     labels:
-      region: us-east-1
+      region:
+        set_value_static: us-east-1
 `
 	require.NoError(t, os.WriteFile(filename, []byte(content), 0o666))
 	provider, err := NewFileRuleProvider(filename)

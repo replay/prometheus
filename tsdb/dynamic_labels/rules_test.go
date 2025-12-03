@@ -32,16 +32,19 @@ dynamic_labels:
   - matchers:
       - '{zone="us-east-1a", cluster="prod"}'
     labels:
-      region: us-east-1
+      region:
+        set_value_static: us-east-1
   - matchers:
       - '{zone=~"eu-west-1.*"}'
     labels:
-      region: eu-west-1
+      region:
+        set_value_static: eu-west-1
   - matchers:
       - '{zone="eu-central-0a"}'
       - '{zone="eu-central-0b"}'
     labels:
-      region: eu-central-0
+      region:
+        set_value_static: eu-central-0
 `
 	err := os.WriteFile(filename, []byte(content), 0o666)
 	require.NoError(t, err)
@@ -55,8 +58,10 @@ dynamic_labels:
 	// Check that each rule has the expected labels
 	regionLabels := make(map[string]bool)
 	for _, rule := range rules {
-		if region, ok := rule.Labels["region"]; ok {
-			regionLabels[region] = true
+		if regionConfig, ok := rule.Labels["region"]; ok {
+			if !regionConfig.IsTemplate {
+				regionLabels[regionConfig.StaticValue] = true
+			}
 		}
 	}
 	require.True(t, regionLabels["us-east-1"])
@@ -122,6 +127,58 @@ func TestParseMatchers(t *testing.T) {
 	// but we can add specific edge cases here if needed.
 }
 
+func TestTemplateEvaluation(t *testing.T) {
+	tmpDir := t.TempDir()
+	filename := filepath.Join(tmpDir, "dynamic_labels.yml")
+
+	content := `
+dynamic_labels:
+  - matchers:
+      - '{instance=~"^localhost:90([0-9]{2})$"}'
+    labels:
+      abctest1:
+        set_value_static: value1
+      abctest2:
+        set_value_from_labels: "${job}/${instance}"
+`
+	err := os.WriteFile(filename, []byte(content), 0o666)
+	require.NoError(t, err)
+
+	provider, err := NewFileRuleProvider(filename)
+	require.NoError(t, err)
+	defer provider.Stop()
+
+	// Test template evaluation
+	cases := []struct {
+		name     string
+		labels   labels.Labels
+		expected labels.Labels
+	}{
+		{
+			name:     "template evaluation with job and instance",
+			labels:   labels.FromStrings("instance", "localhost:9090", "job", "prometheus", "app", "test"),
+			expected: labels.FromStrings("abctest1", "value1", "abctest2", "prometheus/localhost:9090", "instance", "localhost:9090", "job", "prometheus", "app", "test"),
+		},
+		{
+			name:     "template with missing label leaves pattern",
+			labels:   labels.FromStrings("instance", "localhost:9090", "app", "test"),
+			expected: labels.FromStrings("abctest1", "value1", "abctest2", "${job}/localhost:9090", "instance", "localhost:9090", "app", "test"),
+		},
+		{
+			name:     "no match",
+			labels:   labels.FromStrings("instance", "remote:9090", "job", "prometheus"),
+			expected: labels.FromStrings("instance", "remote:9090", "job", "prometheus"),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			enriched := EnrichLabels(tc.labels, provider)
+			require.Equal(t, tc.expected, enriched, "EnrichLabels mismatch")
+		})
+	}
+}
+
 func TestFileRuleProviderRuntimeReload(t *testing.T) {
 	tmpDir := t.TempDir()
 	filename := filepath.Join(tmpDir, "dynamic_labels.yml")
@@ -132,7 +189,8 @@ dynamic_labels:
   - matchers:
       - '{zone="us-east-1a"}'
     labels:
-      region: us-east-1
+      region:
+        set_value_static: us-east-1
 `
 	err := os.WriteFile(filename, []byte(initialContent), 0o666)
 	require.NoError(t, err)
@@ -144,7 +202,8 @@ dynamic_labels:
 	// Verify initial rules
 	rules := provider.GetRules()
 	require.Len(t, rules, 1)
-	require.Equal(t, "us-east-1", rules[0].Labels["region"])
+	require.Equal(t, "us-east-1", rules[0].Labels["region"].StaticValue)
+	require.False(t, rules[0].Labels["region"].IsTemplate)
 
 	// Update the file with new rules
 	updatedContent := `
@@ -152,15 +211,18 @@ dynamic_labels:
   - matchers:
       - '{zone="us-east-1a"}'
     labels:
-      region: us-east-1
+      region:
+        set_value_static: us-east-1
   - matchers:
       - '{zone=~"eu-west-1.*"}'
     labels:
-      region: eu-west-1
+      region:
+        set_value_static: eu-west-1
   - matchers:
       - '{cluster="prod"}'
     labels:
-      environment: production
+      environment:
+        set_value_static: production
 `
 	err = os.WriteFile(filename, []byte(updatedContent), 0o666)
 	require.NoError(t, err)
@@ -177,14 +239,14 @@ dynamic_labels:
 	hasRegionWest := false
 	hasEnvProd := false
 	for _, rule := range rules {
-		if region, ok := rule.Labels["region"]; ok {
-			if region == "us-east-1" {
+		if regionConfig, ok := rule.Labels["region"]; ok && !regionConfig.IsTemplate {
+			if regionConfig.StaticValue == "us-east-1" {
 				hasRegionEast = true
-			} else if region == "eu-west-1" {
+			} else if regionConfig.StaticValue == "eu-west-1" {
 				hasRegionWest = true
 			}
 		}
-		if env, ok := rule.Labels["environment"]; ok && env == "production" {
+		if envConfig, ok := rule.Labels["environment"]; ok && !envConfig.IsTemplate && envConfig.StaticValue == "production" {
 			hasEnvProd = true
 		}
 	}

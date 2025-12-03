@@ -50,8 +50,11 @@ func TestPostingsForMatchers_DynamicLabels(t *testing.T) {
 					labels.MustNewMatcher(labels.MatchEqual, "cluster", "prod"),
 				},
 			},
-			Labels: map[string]string{
-				"region": "us-east-1",
+			Labels: map[string]dynamic_labels.LabelValueConfig{
+				"region": {
+					StaticValue: "us-east-1",
+					IsTemplate:  false,
+				},
 			},
 		},
 		{
@@ -60,8 +63,11 @@ func TestPostingsForMatchers_DynamicLabels(t *testing.T) {
 					labels.MustNewMatcher(labels.MatchEqual, "zone", "eu-west-1b"),
 				},
 			},
-			Labels: map[string]string{
-				"region": "eu-west-1",
+			Labels: map[string]dynamic_labels.LabelValueConfig{
+				"region": {
+					StaticValue: "eu-west-1",
+					IsTemplate:  false,
+				},
 			},
 		},
 	}

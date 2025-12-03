@@ -1686,12 +1686,22 @@ func sanitizeAttributes(attributes []string, adjective string) error {
 	return err
 }
 
+// DynamicLabelValueConfig defines how a dynamic label value is determined.
+type DynamicLabelValueConfig struct {
+	// SetValueStatic sets a static value for the label.
+	SetValueStatic *string `yaml:"set_value_static,omitempty"`
+	// SetValueFromLabels sets the value from a template using other label values.
+	// The template can use ${label_name} syntax to reference other labels.
+	SetValueFromLabels *string `yaml:"set_value_from_labels,omitempty"`
+}
+
 // DynamicLabelRule defines a single rule for dynamic labels.
 type DynamicLabelRule struct {
 	// Matchers is a list of matcher strings. If any matcher matches, the rule applies (OR logic).
 	Matchers []string `yaml:"matchers"`
 	// Labels defines which labels should be assigned to matching series.
-	Labels map[string]string `yaml:"labels"`
+	// Each label can have either set_value_static or set_value_from_labels.
+	Labels map[string]DynamicLabelValueConfig `yaml:"labels"`
 }
 
 // DynamicLabelsConfig defines the structure for dynamic labels configuration

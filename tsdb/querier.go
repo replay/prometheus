@@ -397,9 +397,15 @@ func PostingsForMatchers(ctx context.Context, ix IndexReader, ms ...*labels.Matc
 
 		// Build a map: dynamic label name -> label value -> list of matcher sets
 		// This allows efficient lookup for query processing
+		// Note: Only static values can be used for querying; template-based labels are skipped
 		dynamicLabelMap := make(map[string]map[string][][]*labels.Matcher)
 		for _, rule := range rules {
-			for labelName, labelValue := range rule.Labels {
+			for labelName, labelConfig := range rule.Labels {
+				// Skip template-based labels for query processing (can't match without series context)
+				if labelConfig.IsTemplate {
+					continue
+				}
+				labelValue := labelConfig.StaticValue
 				if dynamicLabelMap[labelName] == nil {
 					dynamicLabelMap[labelName] = make(map[string][][]*labels.Matcher)
 				}
