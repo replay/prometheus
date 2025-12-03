@@ -225,7 +225,7 @@ func (p *FileRuleProvider) GetDynamicLabelsForSeries(seriesLabels labels.Labels)
 }
 
 // evaluateTemplate replaces ${label_name} patterns in the template with actual label values.
-// If a referenced label doesn't exist, the ${label_name} pattern is left as-is.
+// If a referenced label doesn't exist, an empty string is returned for that pattern.
 var templateVarRegex = regexp.MustCompile(`\$\{([^}]+)\}`)
 
 func evaluateTemplate(template string, seriesLabels labels.Labels) string {
@@ -234,8 +234,8 @@ func evaluateTemplate(template string, seriesLabels labels.Labels) string {
 		labelName := templateVarRegex.FindStringSubmatch(match)[1]
 		value := seriesLabels.Get(labelName)
 		if value == "" {
-			// If label doesn't exist, return the original pattern
-			return match
+			// If label doesn't exist, return empty string
+			return ""
 		}
 		return value
 	})

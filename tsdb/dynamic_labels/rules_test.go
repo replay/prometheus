@@ -160,9 +160,9 @@ dynamic_labels:
 			expected: labels.FromStrings("abctest1", "value1", "abctest2", "prometheus/localhost:9090", "instance", "localhost:9090", "job", "prometheus", "app", "test"),
 		},
 		{
-			name:     "template with missing label leaves pattern",
+			name:     "template with missing label returns empty string",
 			labels:   labels.FromStrings("instance", "localhost:9090", "app", "test"),
-			expected: labels.FromStrings("abctest1", "value1", "abctest2", "${job}/localhost:9090", "instance", "localhost:9090", "app", "test"),
+			expected: labels.FromStrings("abctest1", "value1", "abctest2", "/localhost:9090", "instance", "localhost:9090", "app", "test"),
 		},
 		{
 			name:     "no match",
