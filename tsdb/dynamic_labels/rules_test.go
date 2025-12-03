@@ -347,3 +347,65 @@ func TestReverseEngineerTemplateValue(t *testing.T) {
 		})
 	}
 }
+
+func TestFileRuleProviderCaching(t *testing.T) {
+	tmpDir := t.TempDir()
+	filename := filepath.Join(tmpDir, "dynamic_labels.yml")
+
+	// Initial content with 2 rules
+	content1 := `
+dynamic_labels:
+  - matchers:
+      - '{job="app1"}'
+    labels:
+      team:
+        set_value_static: team-a
+  - matchers:
+      - '{env="prod"}'
+    labels:
+      criticality:
+        set_value_static: high
+`
+	err := os.WriteFile(filename, []byte(content1), 0o666)
+	require.NoError(t, err)
+
+	provider, err := NewFileRuleProvider(filename)
+	require.NoError(t, err)
+	defer provider.Stop()
+
+	// Define a test series that matches both rules
+	series := labels.FromStrings("job", "app1", "env", "prod", "instance", "inst1")
+
+	// First enrichment - should populate cache
+	enriched1 := EnrichLabels(series, provider)
+	require.Equal(t, "team-a", enriched1.Get("team"))
+	require.Equal(t, "high", enriched1.Get("criticality"))
+
+	// Update config: modify rule 1 (team-a -> team-b), keep rule 2 same
+	content2 := `
+dynamic_labels:
+  - matchers:
+      - '{job="app1"}'
+    labels:
+      team:
+        set_value_static: team-b
+  - matchers:
+      - '{env="prod"}'
+    labels:
+      criticality:
+        set_value_static: high
+`
+	err = os.WriteFile(filename, []byte(content2), 0o666)
+	require.NoError(t, err)
+
+	// Trigger reload manually to ensure it happens synchronously for test
+	err = provider.Load(filename)
+	require.NoError(t, err)
+
+	// Verify that partial cache invalidation works correctly
+	// The rule for 'team' changed, so its cache should be invalidated and new value returned.
+	// The rule for 'criticality' didn't change, so its cache was preserved (though we can't verify preservation directly, we verify result correctness).
+	enriched2 := EnrichLabels(series, provider)
+	require.Equal(t, "team-b", enriched2.Get("team"), "Modified rule should return new value")
+	require.Equal(t, "high", enriched2.Get("criticality"), "Unmodified rule should return same value")
+}

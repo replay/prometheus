@@ -19,10 +19,12 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/cespare/xxhash/v2"
 	"github.com/fsnotify/fsnotify"
 	"github.com/prometheus/prometheus/config"
 	"github.com/prometheus/prometheus/model/labels"
@@ -71,6 +73,11 @@ type FileRuleProvider struct {
 	ctx      context.Context
 	cancel   context.CancelFunc
 	wg       sync.WaitGroup
+
+	// cache stores computed labels per rule and per series.
+	// Structure: ruleHash -> *sync.Map (seriesHash -> labels.Labels)
+	cache      sync.Map
+	ruleHashes []uint64
 }
 
 // NewFileRuleProvider creates a new FileRuleProvider and starts watching the file for changes.
@@ -164,9 +171,29 @@ func (p *FileRuleProvider) Load(filename string) error {
 		})
 	}
 
+	// Compute hashes for new rules
+	newRuleHashes := make([]uint64, len(rules))
+	for i, rule := range rules {
+		newRuleHashes[i] = computeRuleHash(rule)
+	}
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	// Invalidate cache for rules that are no longer present
+	newHashesMap := make(map[uint64]struct{}, len(newRuleHashes))
+	for _, h := range newRuleHashes {
+		newHashesMap[h] = struct{}{}
+	}
+
+	for _, oldHash := range p.ruleHashes {
+		if _, exists := newHashesMap[oldHash]; !exists {
+			p.cache.Delete(oldHash)
+		}
+	}
+
 	p.rules = rules
+	p.ruleHashes = newRuleHashes
 	return nil
 }
 
@@ -184,9 +211,26 @@ func (p *FileRuleProvider) GetDynamicLabelsForSeries(seriesLabels labels.Labels)
 	defer p.mu.RUnlock()
 
 	var builder labels.ScratchBuilder
+	seriesHash := seriesLabels.Hash()
 
 	// Iterate through each rule
-	for _, rule := range p.rules {
+	for i, rule := range p.rules {
+		// Safety check, though ruleHashes should always be populated in Load
+		if i >= len(p.ruleHashes) {
+			continue
+		}
+		ruleHash := p.ruleHashes[i]
+		ruleCache := p.getOrCreateRuleCache(ruleHash)
+
+		if cached, ok := ruleCache.Load(seriesHash); ok {
+			if cachedLabels, ok := cached.(labels.Labels); ok {
+				cachedLabels.Range(func(l labels.Label) {
+					builder.Add(l.Name, l.Value)
+				})
+				continue
+			}
+		}
+
 		// Check if any matcher set matches (OR logic)
 		ruleMatches := false
 		for _, matcherSet := range rule.Matchers {
@@ -205,8 +249,10 @@ func (p *FileRuleProvider) GetDynamicLabelsForSeries(seriesLabels labels.Labels)
 			}
 		}
 
+		var ruleLabels labels.Labels
 		// If the rule matches, add all its labels
 		if ruleMatches {
+			var ruleBuilder labels.ScratchBuilder
 			for name, valueConfig := range rule.Labels {
 				var value string
 				if valueConfig.IsTemplate {
@@ -215,13 +261,63 @@ func (p *FileRuleProvider) GetDynamicLabelsForSeries(seriesLabels labels.Labels)
 				} else {
 					value = valueConfig.StaticValue
 				}
+				ruleBuilder.Add(name, value)
 				builder.Add(name, value)
 			}
+			ruleBuilder.Sort()
+			ruleLabels = ruleBuilder.Labels()
+		} else {
+			ruleLabels = labels.EmptyLabels()
 		}
+
+		ruleCache.Store(seriesHash, ruleLabels)
 	}
 
 	builder.Sort()
 	return builder.Labels()
+}
+
+func (p *FileRuleProvider) getOrCreateRuleCache(ruleHash uint64) *sync.Map {
+	if v, ok := p.cache.Load(ruleHash); ok {
+		return v.(*sync.Map)
+	}
+	v, _ := p.cache.LoadOrStore(ruleHash, &sync.Map{})
+	return v.(*sync.Map)
+}
+
+func computeRuleHash(rule Rule) uint64 {
+	h := xxhash.New()
+
+	// Hash matchers
+	for _, matcherSet := range rule.Matchers {
+		for _, m := range matcherSet {
+			h.WriteString(m.Type.String())
+			h.WriteString(m.Name)
+			h.WriteString(m.Value)
+		}
+	}
+
+	// Hash label configs
+	// To ensure deterministic hashing, we need to iterate keys in order
+	labelNames := make([]string, 0, len(rule.Labels))
+	for name := range rule.Labels {
+		labelNames = append(labelNames, name)
+	}
+	sort.Strings(labelNames)
+
+	for _, name := range labelNames {
+		h.WriteString(name)
+		config := rule.Labels[name]
+		if config.IsTemplate {
+			h.WriteString("template")
+			h.WriteString(config.TemplateValue)
+		} else {
+			h.WriteString("static")
+			h.WriteString(config.StaticValue)
+		}
+	}
+
+	return h.Sum64()
 }
 
 // evaluateTemplate replaces ${label_name} patterns in the template with actual label values.
