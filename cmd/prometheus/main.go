@@ -76,6 +76,7 @@ import (
 	"github.com/prometheus/prometheus/tracing"
 	"github.com/prometheus/prometheus/tsdb"
 	"github.com/prometheus/prometheus/tsdb/agent"
+	"github.com/prometheus/prometheus/tsdb/dynamic_labels"
 	"github.com/prometheus/prometheus/util/compression"
 	"github.com/prometheus/prometheus/util/documentcli"
 	"github.com/prometheus/prometheus/util/logging"
@@ -1302,6 +1303,18 @@ func main() {
 	if !agentMode {
 		// TSDB.
 		opts := cfg.tsdb.ToTSDBOptions()
+		
+		var ruleProvider dynamic_labels.RuleProvider
+		if cfgFile.DynamicLabelsFile != "" {
+			rp, err := dynamic_labels.NewFileRuleProvider(cfgFile.DynamicLabelsFile)
+			if err != nil {
+				logger.Error("Error creating rule provider", "err", err)
+				os.Exit(1)
+			}
+			ruleProvider = rp
+		}
+		opts.RuleProvider = ruleProvider
+
 		cancel := make(chan struct{})
 		g.Add(
 			func() error {

@@ -41,6 +41,7 @@ import (
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
 	"github.com/prometheus/prometheus/tsdb/chunks"
+	"github.com/prometheus/prometheus/tsdb/dynamic_labels"
 	tsdb_errors "github.com/prometheus/prometheus/tsdb/errors"
 	"github.com/prometheus/prometheus/tsdb/fileutil"
 	_ "github.com/prometheus/prometheus/tsdb/goversion" // Load the package into main to make sure minimum Go version is met.
@@ -223,6 +224,8 @@ type Options struct {
 	// BlockCompactionExcludeFunc is a function which returns true for blocks that should NOT be compacted.
 	// It's passed down to the TSDB compactor.
 	BlockCompactionExcludeFunc BlockExcludeFilterFunc
+
+	RuleProvider dynamic_labels.RuleProvider
 }
 
 type NewCompactorFunc func(ctx context.Context, r prometheus.Registerer, l *slog.Logger, ranges []int64, pool chunkenc.Pool, opts *Options) (Compactor, error)
@@ -641,7 +644,7 @@ func (db *DBReadOnly) Blocks() ([]BlockReader, error) {
 		return nil, ErrClosed
 	default:
 	}
-	loadable, corrupted, err := openBlocks(db.logger, db.dir, nil, nil, DefaultPostingsDecoderFactory)
+	loadable, corrupted, err := openBlocks(db.logger, db.dir, nil, nil, DefaultPostingsDecoderFactory, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -751,7 +754,7 @@ func (db *DBReadOnly) Block(blockID string, postingsDecoderFactory PostingsDecod
 		return nil, fmt.Errorf("invalid block ID %s", blockID)
 	}
 
-	block, err := OpenBlock(db.logger, filepath.Join(db.dir, blockID), nil, postingsDecoderFactory)
+	block, err := OpenBlock(db.logger, filepath.Join(db.dir, blockID), nil, postingsDecoderFactory, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -973,6 +976,7 @@ func open(dir string, l *slog.Logger, r prometheus.Registerer, opts *Options, rn
 	headOpts.OutOfOrderTimeWindow.Store(opts.OutOfOrderTimeWindow)
 	headOpts.OutOfOrderCapMax.Store(opts.OutOfOrderCapMax)
 	headOpts.EnableSharding = opts.EnableSharding
+	headOpts.RuleProvider = opts.RuleProvider
 	if opts.WALReplayConcurrency > 0 {
 		headOpts.WALReplayConcurrency = opts.WALReplayConcurrency
 	}
@@ -1179,6 +1183,24 @@ func (db *DB) ApplyConfig(conf *config.Config) error {
 	}
 	if oooTimeWindow < 0 {
 		oooTimeWindow = 0
+	}
+
+	if conf.DynamicLabelsFile != "" {
+		// Check if we can reload existing provider
+		if frp, ok := db.opts.RuleProvider.(*dynamic_labels.FileRuleProvider); ok {
+			if err := frp.Load(conf.DynamicLabelsFile); err != nil {
+				return err
+			}
+		} else {
+			// Create new
+			rp, err := dynamic_labels.NewFileRuleProvider(conf.DynamicLabelsFile)
+			if err != nil {
+				return err
+			}
+			db.opts.RuleProvider = rp
+		}
+	} else {
+		db.opts.RuleProvider = nil
 	}
 
 	// Create WBL if it was not present and if OOO is enabled with WAL enabled.
@@ -1597,7 +1619,7 @@ func (db *DB) reloadBlocks() (err error) {
 	}()
 
 	db.mtx.RLock()
-	loadable, corrupted, err := openBlocks(db.logger, db.dir, db.blocks, db.chunkPool, db.opts.PostingsDecoderFactory)
+	loadable, corrupted, err := openBlocks(db.logger, db.dir, db.blocks, db.chunkPool, db.opts.PostingsDecoderFactory, db.opts.RuleProvider)
 	db.mtx.RUnlock()
 	if err != nil {
 		return err
@@ -1697,7 +1719,7 @@ func (db *DB) reloadBlocks() (err error) {
 	return nil
 }
 
-func openBlocks(l *slog.Logger, dir string, loaded []*Block, chunkPool chunkenc.Pool, postingsDecoderFactory PostingsDecoderFactory) (blocks []*Block, corrupted map[ulid.ULID]error, err error) {
+func openBlocks(l *slog.Logger, dir string, loaded []*Block, chunkPool chunkenc.Pool, postingsDecoderFactory PostingsDecoderFactory, ruleProvider dynamic_labels.RuleProvider) (blocks []*Block, corrupted map[ulid.ULID]error, err error) {
 	bDirs, err := blockDirs(dir)
 	if err != nil {
 		return nil, nil, fmt.Errorf("find blocks: %w", err)
@@ -1714,7 +1736,7 @@ func openBlocks(l *slog.Logger, dir string, loaded []*Block, chunkPool chunkenc.
 		// See if we already have the block in memory or open it otherwise.
 		block, open := getBlock(loaded, meta.ULID)
 		if !open {
-			block, err = OpenBlock(l, bDir, chunkPool, postingsDecoderFactory)
+			block, err = OpenBlock(l, bDir, chunkPool, postingsDecoderFactory, ruleProvider)
 			if err != nil {
 				corrupted[meta.ULID] = err
 				continue

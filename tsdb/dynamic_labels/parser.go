@@ -1,0 +1,58 @@
+// Copyright 2025 The Prometheus Authors
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package dynamic_labels
+
+import (
+	"fmt"
+
+	"github.com/prometheus/prometheus/model/labels"
+	"github.com/prometheus/prometheus/promql/parser"
+)
+
+// ParseMatcherString parses a single matcher string (metric selector) into a list of labels.Matcher.
+// The string can contain multiple matchers, e.g., '{version="go1.25.4",instance="localhost:9090"}'.
+// If the string is a bare metric name (no braces), it will be converted to {__name__="metric_name"}.
+func ParseMatcherString(matcherStr string) ([]*labels.Matcher, error) {
+	// If the string doesn't start with '{', treat it as a bare metric name
+	// and convert it to a proper selector format
+	selectorStr := matcherStr
+	if len(matcherStr) == 0 {
+		return nil, fmt.Errorf("empty matcher string")
+	}
+	if matcherStr[0] != '{' {
+		// It's a bare metric name, wrap it in a selector
+		selectorStr = fmt.Sprintf(`{__name__="%s"}`, matcherStr)
+	}
+
+	matchers, err := parser.ParseMetricSelector(selectorStr)
+	if err != nil {
+		return nil, fmt.Errorf("parse matcher string %q: %w", matcherStr, err)
+	}
+	return matchers, nil
+}
+
+// ParseMatchers parses a list of LabelMatcherConfig into a list of labels.Matcher.
+// Deprecated: Use ParseMatcherString for the new format.
+func ParseMatchers(configs []string) ([][]*labels.Matcher, error) {
+	matchers := make([][]*labels.Matcher, 0, len(configs))
+	for i, s := range configs {
+		m, err := parser.ParseMetricSelector(s)
+
+		if err != nil {
+			return nil, fmt.Errorf("parse matcher at index %d (%q): %w", i, s, err)
+		}
+		matchers = append(matchers, m)
+	}
+	return matchers, nil
+}

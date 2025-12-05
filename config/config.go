@@ -289,6 +289,8 @@ type Config struct {
 	RemoteReadConfigs  []*RemoteReadConfig  `yaml:"remote_read,omitempty"`
 	OTLPConfig         OTLPConfig           `yaml:"otlp,omitempty"`
 
+	DynamicLabelsFile string `yaml:"dynamic_labels_file,omitempty"`
+
 	loaded bool // Certain methods require configuration to use Load validation.
 }
 
@@ -313,6 +315,7 @@ func (c *Config) SetDirectory(dir string) {
 	for _, c := range c.RemoteReadConfigs {
 		c.SetDirectory(dir)
 	}
+	c.DynamicLabelsFile = config.JoinDir(dir, c.DynamicLabelsFile)
 }
 
 func (c Config) String() string {
@@ -1681,4 +1684,44 @@ func sanitizeAttributes(attributes []string, adjective string) error {
 		attributes[i] = attr
 	}
 	return err
+}
+
+// DynamicLabelValueConfig defines how a dynamic label value is determined.
+type DynamicLabelValueConfig struct {
+	// SetValueStatic sets a static value for the label.
+	SetValueStatic *string `yaml:"set_value_static,omitempty"`
+	// SetValueFromPrioritizedLabels sets the value from a list of labels.
+	// The first label that exists in the series will be used.
+	SetValueFromPrioritizedLabels []string `yaml:"set_value_from_prioritized_labels,omitempty"`
+	// SetValueFromJoinedLabels sets the value by joining values from a list of labels.
+	// All labels must exist in the series for the dynamic label to be set.
+	SetValueFromJoinedLabels *struct {
+		Labels    []string `yaml:"labels"`
+		Separator string   `yaml:"separator"`
+	} `yaml:"set_value_from_joined_labels,omitempty"`
+}
+
+// DynamicLabelRule defines a single rule for dynamic labels.
+type DynamicLabelRule struct {
+	// Matchers is a list of matcher strings. If any matcher matches, the rule applies (OR logic).
+	Matchers []string `yaml:"matchers"`
+	// Labels defines which labels should be assigned to matching series.
+	// Each label can have either set_value_static, set_value_from_prioritized_labels,
+	// or set_value_from_joined_labels.
+	Labels map[string]DynamicLabelValueConfig `yaml:"labels"`
+}
+
+// DynamicLabelsConfig defines the structure for dynamic labels configuration
+type DynamicLabelsConfig struct {
+	// DynamicLabels is a list of rules. Each rule has matchers (OR'd together) and labels to apply.
+	DynamicLabels []DynamicLabelRule `yaml:"dynamic_labels"`
+}
+
+// UnmarshalYAML implements the yaml.Unmarshaler interface.
+func (c *DynamicLabelsConfig) UnmarshalYAML(unmarshal func(any) error) error {
+	type plain DynamicLabelsConfig
+	if err := unmarshal((*plain)(c)); err != nil {
+		return err
+	}
+	return nil
 }
