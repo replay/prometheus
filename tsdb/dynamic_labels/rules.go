@@ -35,6 +35,10 @@ type LabelValueConfig struct {
 	StaticValue string
 	// FromLabels is a list of source labels to check. The first existing label's value is used.
 	FromLabels []string
+	// JoinedLabels is a list of source labels to join.
+	JoinedLabels []string
+	// Separator is the string used to join values.
+	Separator string
 	// IsDynamic indicates whether this is a dynamic value (true) or static value (false).
 	IsDynamic bool
 }
@@ -139,11 +143,19 @@ func (p *FileRuleProvider) Load(filename string) error {
 		// Convert label configurations
 		labelConfigs := make(map[string]LabelValueConfig)
 		for labelName, labelConfig := range ruleConfig.Labels {
-			if labelConfig.SetValueStatic != nil && labelConfig.SetValueFromLabels != nil {
-				return fmt.Errorf("rule at index %d, label %q: cannot specify both set_value_static and set_value_from_labels", i, labelName)
+			setCount := 0
+			if labelConfig.SetValueStatic != nil {
+				setCount++
 			}
-			if labelConfig.SetValueStatic == nil && labelConfig.SetValueFromLabels == nil {
-				return fmt.Errorf("rule at index %d, label %q: must specify either set_value_static or set_value_from_labels", i, labelName)
+			if labelConfig.SetValueFromPrioritizedLabels != nil {
+				setCount++
+			}
+			if labelConfig.SetValueFromJoinedLabels != nil {
+				setCount++
+			}
+
+			if setCount != 1 {
+				return fmt.Errorf("rule at index %d, label %q: must specify exactly one of set_value_static, set_value_from_prioritized_labels, or set_value_from_joined_labels", i, labelName)
 			}
 
 			if labelConfig.SetValueStatic != nil {
@@ -151,10 +163,16 @@ func (p *FileRuleProvider) Load(filename string) error {
 					StaticValue: *labelConfig.SetValueStatic,
 					IsDynamic:   false,
 				}
+			} else if labelConfig.SetValueFromPrioritizedLabels != nil {
+				labelConfigs[labelName] = LabelValueConfig{
+					FromLabels: labelConfig.SetValueFromPrioritizedLabels,
+					IsDynamic:  true,
+				}
 			} else {
 				labelConfigs[labelName] = LabelValueConfig{
-					FromLabels: labelConfig.SetValueFromLabels,
-					IsDynamic:  true,
+					JoinedLabels: labelConfig.SetValueFromJoinedLabels.Labels,
+					Separator:    labelConfig.SetValueFromJoinedLabels.Separator,
+					IsDynamic:    true,
 				}
 			}
 		}
@@ -269,11 +287,31 @@ func (p *FileRuleProvider) GetDynamicLabelsForSeries(seriesLabels labels.Labels)
 			for name, valueConfig := range rule.Labels {
 				var value string
 				if valueConfig.IsDynamic {
-					// Iterate through source labels and pick the first one that exists
-					for _, sourceLabel := range valueConfig.FromLabels {
-						if val := seriesLabels.Get(sourceLabel); val != "" {
-							value = val
-							break
+					if len(valueConfig.JoinedLabels) > 0 {
+						// Handle joined labels
+						var joinedValue string
+						allFound := true
+						for i, sourceLabel := range valueConfig.JoinedLabels {
+							val := seriesLabels.Get(sourceLabel)
+							if val == "" {
+								allFound = false
+								break
+							}
+							if i > 0 {
+								joinedValue += valueConfig.Separator
+							}
+							joinedValue += val
+						}
+						if allFound {
+							value = joinedValue
+						}
+					} else {
+						// Iterate through source labels and pick the first one that exists
+						for _, sourceLabel := range valueConfig.FromLabels {
+							if val := seriesLabels.Get(sourceLabel); val != "" {
+								value = val
+								break
+							}
 						}
 					}
 				} else {
@@ -330,8 +368,17 @@ func computeRuleHash(rule Rule) uint64 {
 		config := rule.Labels[name]
 		if config.IsDynamic {
 			h.WriteString("dynamic")
-			for _, l := range config.FromLabels {
-				h.WriteString(l)
+			if len(config.JoinedLabels) > 0 {
+				h.WriteString("joined")
+				for _, l := range config.JoinedLabels {
+					h.WriteString(l)
+				}
+				h.WriteString("sep")
+				h.WriteString(config.Separator)
+			} else {
+				for _, l := range config.FromLabels {
+					h.WriteString(l)
+				}
 			}
 		} else {
 			h.WriteString("static")

@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"strings"
 
 	"github.com/oklog/ulid/v2"
 
@@ -243,13 +244,18 @@ func getDynamicLabelValues(ctx context.Context, r IndexReader, rp dynamic_labels
 
 	if matchesEverything {
 		var fromLabels []string
+		hasJoined := false
 		for _, rule := range rp.GetRules() {
 			if cfg, ok := rule.Labels[name]; ok && cfg.IsDynamic {
+				if len(cfg.JoinedLabels) > 0 {
+					hasJoined = true
+					break
+				}
 				fromLabels = append(fromLabels, cfg.FromLabels...)
 			}
 		}
 
-		if len(fromLabels) > 0 {
+		if !hasJoined && len(fromLabels) > 0 {
 			uniqueValues := make(map[string]struct{})
 			for _, label := range fromLabels {
 				vals, err := r.LabelValues(ctx, label, nil)
@@ -563,8 +569,10 @@ func PostingsForMatchers(ctx context.Context, ix IndexReader, ms ...*labels.Matc
 		// Build a map: dynamic label name -> dynamic configuration
 		// This allows lookup for dynamic labels based on other labels
 		dynamicConfigMap := make(map[string]struct {
-			fromLabels []string
-			matchers   [][]*labels.Matcher
+			fromLabels   []string
+			joinedLabels []string
+			separator    string
+			matchers     [][]*labels.Matcher
 		})
 
 		for _, rule := range rules {
@@ -572,11 +580,15 @@ func PostingsForMatchers(ctx context.Context, ix IndexReader, ms ...*labels.Matc
 				if labelConfig.IsDynamic {
 					// Store dynamic label configuration
 					dynamicConfigMap[labelName] = struct {
-						fromLabels []string
-						matchers   [][]*labels.Matcher
+						fromLabels   []string
+						joinedLabels []string
+						separator    string
+						matchers     [][]*labels.Matcher
 					}{
-						fromLabels: labelConfig.FromLabels,
-						matchers:   rule.Matchers,
+						fromLabels:   labelConfig.FromLabels,
+						joinedLabels: labelConfig.JoinedLabels,
+						separator:    labelConfig.Separator,
+						matchers:     rule.Matchers,
 					}
 				} else {
 					// Store static value configuration
@@ -602,6 +614,68 @@ func PostingsForMatchers(ctx context.Context, ix IndexReader, ms ...*labels.Matc
 
 			// Check if this is a dynamic label based on other labels
 			if dynConfig, ok := dynamicConfigMap[m.Name]; ok {
+				if len(dynConfig.joinedLabels) > 0 {
+					// Handle joined labels
+					// We only support full string matching for joined labels.
+					if m.Type != labels.MatchEqual {
+						// For joined labels, we can't easily support regex or negative matching
+						// via index lookup because we'd need to decompose the query.
+						// For MatchEqual, we can split the string.
+						return index.EmptyPostings(), nil
+					}
+
+					// Decompose the value
+					parts := strings.Split(m.Value, dynConfig.separator)
+					if len(parts) != len(dynConfig.joinedLabels) {
+						// The value doesn't have the correct structure
+						return index.EmptyPostings(), nil
+					}
+
+					// Try each matcher set from the rule
+					for _, ruleMatcherSet := range dynConfig.matchers {
+						currentBranchMatchers := make([]*labels.Matcher, 0, len(ruleMatcherSet)+len(dynConfig.joinedLabels))
+						currentBranchMatchers = append(currentBranchMatchers, ruleMatcherSet...)
+
+						// Add matchers for each source label
+						validBranch := true
+						for i, sourceLabel := range dynConfig.joinedLabels {
+							// Check for conflict with rule matchers
+							for _, rm := range ruleMatcherSet {
+								if rm.Name == sourceLabel && !rm.Matches(parts[i]) {
+									validBranch = false
+									break
+								}
+							}
+							if !validBranch {
+								break
+							}
+
+							matcher, err := labels.NewMatcher(labels.MatchEqual, sourceLabel, parts[i])
+							if err != nil {
+								return nil, err
+							}
+							currentBranchMatchers = append(currentBranchMatchers, matcher)
+						}
+
+						if !validBranch {
+							continue
+						}
+
+						p, err := PostingsForMatchers(ctx, ix, currentBranchMatchers...)
+						if err != nil {
+							return nil, err
+						}
+						subIts = append(subIts, p)
+					}
+
+					if len(subIts) > 0 {
+						its = append(its, index.Merge(ctx, subIts...))
+					} else {
+						return index.EmptyPostings(), nil
+					}
+					continue
+				}
+
 				// Handle dynamic label based on priority list of source labels.
 				// If querying for dynamic_label="value", we need to match series where:
 				// (source_label_1="value") OR

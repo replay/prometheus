@@ -1690,9 +1690,15 @@ func sanitizeAttributes(attributes []string, adjective string) error {
 type DynamicLabelValueConfig struct {
 	// SetValueStatic sets a static value for the label.
 	SetValueStatic *string `yaml:"set_value_static,omitempty"`
-	// SetValueFromLabels sets the value from a list of labels.
+	// SetValueFromPrioritizedLabels sets the value from a list of labels.
 	// The first label that exists in the series will be used.
-	SetValueFromLabels []string `yaml:"set_value_from_labels,omitempty"`
+	SetValueFromPrioritizedLabels []string `yaml:"set_value_from_prioritized_labels,omitempty"`
+	// SetValueFromJoinedLabels sets the value by joining values from a list of labels.
+	// All labels must exist in the series for the dynamic label to be set.
+	SetValueFromJoinedLabels *struct {
+		Labels    []string `yaml:"labels"`
+		Separator string   `yaml:"separator"`
+	} `yaml:"set_value_from_joined_labels,omitempty"`
 }
 
 // DynamicLabelRule defines a single rule for dynamic labels.
@@ -1700,7 +1706,8 @@ type DynamicLabelRule struct {
 	// Matchers is a list of matcher strings. If any matcher matches, the rule applies (OR logic).
 	Matchers []string `yaml:"matchers"`
 	// Labels defines which labels should be assigned to matching series.
-	// Each label can have either set_value_static or set_value_from_labels.
+	// Each label can have either set_value_static, set_value_from_prioritized_labels,
+	// or set_value_from_joined_labels.
 	Labels map[string]DynamicLabelValueConfig `yaml:"labels"`
 }
 
