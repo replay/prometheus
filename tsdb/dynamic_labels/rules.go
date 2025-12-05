@@ -18,9 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -35,13 +33,10 @@ import (
 type LabelValueConfig struct {
 	// StaticValue is a static string value for the label.
 	StaticValue string
-	// TemplateValue is a template string that uses ${label_name} syntax to reference other labels.
-	TemplateValue string
-	// IsTemplate indicates whether this is a template (true) or static value (false).
-	IsTemplate bool
-	// TemplateStructure is the parsed structure of the template (only set if IsTemplate is true).
-	// This is pre-parsed during config load to avoid parsing on every query.
-	TemplateStructure *TemplateStructure
+	// FromLabels is a list of source labels to check. The first existing label's value is used.
+	FromLabels []string
+	// IsDynamic indicates whether this is a dynamic value (true) or static value (false).
+	IsDynamic bool
 }
 
 // Rule represents a single dynamic label rule.
@@ -50,7 +45,7 @@ type Rule struct {
 	// Each matcher set is a list of matchers that must all match (AND logic within a set).
 	Matchers [][]*labels.Matcher
 	// Labels defines which labels should be assigned to matching series.
-	// Each label has a value configuration (static or template).
+	// Each label has a value configuration (static or dynamic).
 	Labels map[string]LabelValueConfig
 }
 
@@ -154,16 +149,12 @@ func (p *FileRuleProvider) Load(filename string) error {
 			if labelConfig.SetValueStatic != nil {
 				labelConfigs[labelName] = LabelValueConfig{
 					StaticValue: *labelConfig.SetValueStatic,
-					IsTemplate:  false,
+					IsDynamic:   false,
 				}
 			} else {
-				// Parse the template structure once during config load
-				templateStr := *labelConfig.SetValueFromLabels
-				parsedStructure := parseTemplateStructure(templateStr)
 				labelConfigs[labelName] = LabelValueConfig{
-					TemplateValue:     templateStr,
-					IsTemplate:        true,
-					TemplateStructure: &parsedStructure,
+					FromLabels: labelConfig.SetValueFromLabels,
+					IsDynamic:  true,
 				}
 			}
 		}
@@ -277,14 +268,21 @@ func (p *FileRuleProvider) GetDynamicLabelsForSeries(seriesLabels labels.Labels)
 			var ruleBuilder labels.ScratchBuilder
 			for name, valueConfig := range rule.Labels {
 				var value string
-				if valueConfig.IsTemplate {
-					// Evaluate template by replacing ${label_name} with actual label values
-					value = evaluateTemplate(valueConfig.TemplateValue, seriesLabels)
+				if valueConfig.IsDynamic {
+					// Iterate through source labels and pick the first one that exists
+					for _, sourceLabel := range valueConfig.FromLabels {
+						if val := seriesLabels.Get(sourceLabel); val != "" {
+							value = val
+							break
+						}
+					}
 				} else {
 					value = valueConfig.StaticValue
 				}
-				ruleBuilder.Add(name, value)
-				builder.Add(name, value)
+				if value != "" {
+					ruleBuilder.Add(name, value)
+					builder.Add(name, value)
+				}
 			}
 			ruleBuilder.Sort()
 			ruleLabels = ruleBuilder.Labels()
@@ -330,9 +328,11 @@ func computeRuleHash(rule Rule) uint64 {
 	for _, name := range labelNames {
 		h.WriteString(name)
 		config := rule.Labels[name]
-		if config.IsTemplate {
-			h.WriteString("template")
-			h.WriteString(config.TemplateValue)
+		if config.IsDynamic {
+			h.WriteString("dynamic")
+			for _, l := range config.FromLabels {
+				h.WriteString(l)
+			}
 		} else {
 			h.WriteString("static")
 			h.WriteString(config.StaticValue)
@@ -340,136 +340,6 @@ func computeRuleHash(rule Rule) uint64 {
 	}
 
 	return h.Sum64()
-}
-
-// evaluateTemplate replaces ${label_name} patterns in the template with actual label values.
-// If a referenced label doesn't exist, an empty string is returned for that pattern.
-var templateVarRegex = regexp.MustCompile(`\$\{([^}]+)\}`)
-
-func evaluateTemplate(template string, seriesLabels labels.Labels) string {
-	return templateVarRegex.ReplaceAllStringFunc(template, func(match string) string {
-		// Extract label name from ${label_name}
-		labelName := templateVarRegex.FindStringSubmatch(match)[1]
-		value := seriesLabels.Get(labelName)
-		if value == "" {
-			// If label doesn't exist, return empty string
-			return ""
-		}
-		return value
-	})
-}
-
-// TemplateStructure represents the parsed structure of a template.
-type TemplateStructure struct {
-	// Parts alternates between literal strings and variable names.
-	// Even indices are literals, odd indices are variable names.
-	// Example: template "${job}/${instance}" -> parts = ["", "job", "/", "instance", ""]
-	parts []string
-	// VariableNames is the list of variable names in order of appearance.
-	variableNames []string
-}
-
-// parseTemplateStructure parses a template string and returns its structure.
-func parseTemplateStructure(template string) TemplateStructure {
-	parts := make([]string, 0)
-	variableNames := make([]string, 0)
-
-	lastIndex := 0
-	matches := templateVarRegex.FindAllStringSubmatchIndex(template, -1)
-
-	for _, match := range matches {
-		// Add literal part before this variable
-		if match[0] > lastIndex {
-			parts = append(parts, template[lastIndex:match[0]])
-		} else {
-			parts = append(parts, "")
-		}
-
-		// Extract variable name (match[2] to match[3] is the first capture group)
-		varName := template[match[2]:match[3]]
-		variableNames = append(variableNames, varName)
-		parts = append(parts, varName)
-
-		lastIndex = match[1]
-	}
-
-	// Add remaining literal part after last variable
-	if lastIndex < len(template) {
-		parts = append(parts, template[lastIndex:])
-	} else {
-		parts = append(parts, "")
-	}
-
-	return TemplateStructure{
-		parts:         parts,
-		variableNames: variableNames,
-	}
-}
-
-// ReverseEngineerTemplateValue attempts to match a value against a template pattern
-// and extract the component label values. Returns a map of label name -> value,
-// or nil if the value doesn't match the template pattern.
-// The templateStructure should be pre-parsed (typically from LabelValueConfig.TemplateStructure).
-func ReverseEngineerTemplateValue(templateStructure *TemplateStructure, template string, value string) map[string]string {
-	structure := templateStructure
-
-	// Build a regex pattern from the template structure
-	// We need to escape literal parts and use capturing groups for variables
-	regexParts := make([]string, 0, len(structure.parts))
-	captureGroupIndex := 0
-
-	for i, part := range structure.parts {
-		if i%2 == 0 {
-			// Even index: literal part
-			// Escape special regex characters
-			escaped := regexp.QuoteMeta(part)
-			regexParts = append(regexParts, escaped)
-		} else {
-			// Odd index: variable part
-			// Use a capturing group that matches any characters
-			// For the last variable, use greedy matching to consume everything
-			// For others, use non-greedy to stop at the next literal
-			if i == len(structure.parts)-2 {
-				// Last variable - use greedy to match everything until the end
-				regexParts = append(regexParts, `(.+)`)
-			} else {
-				// Not the last variable - use non-greedy to stop at next literal
-				regexParts = append(regexParts, `(.+?)`)
-			}
-			captureGroupIndex++
-		}
-	}
-
-	regexPattern := "^" + strings.Join(regexParts, "") + "$"
-	regex := regexp.MustCompile(regexPattern)
-
-	matches := regex.FindStringSubmatch(value)
-	if matches == nil {
-		// Value doesn't match the template pattern
-		return nil
-	}
-
-	// matches[0] is the full match, matches[1..] are the captured groups
-	if len(matches)-1 != len(structure.variableNames) {
-		return nil
-	}
-
-	// Build result map
-	result := make(map[string]string)
-	for i, varName := range structure.variableNames {
-		result[varName] = matches[i+1]
-	}
-
-	// Validate: reconstruct the template with the extracted values and ensure it matches
-	// This ensures we didn't over-match (e.g., matching "job1/instance123/extra" when template is "${job}/${instance}")
-	testLabels := labels.FromMap(result)
-	reconstructed := evaluateTemplate(template, testLabels)
-	if reconstructed != value {
-		// The reconstructed value doesn't match, so this wasn't a valid match
-		return nil
-	}
-
-	return result
 }
 
 // startWatching starts a goroutine that watches the file for changes and reloads rules automatically.

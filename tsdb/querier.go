@@ -230,11 +230,67 @@ func getDynamicLabelValues(ctx context.Context, r IndexReader, rp dynamic_labels
 		return nil, nil
 	}
 
+	fmt.Printf("getDynamicLabelValues: index reader address: %p\n", r)
+
+	// Optimization: if no matchers (or matching everything), we can query source labels directly.
+	// This is much faster than iterating all series.
+	matchesEverything := false
+	if len(matchers) == 0 {
+		matchesEverything = true
+	} else if len(matchers) == 1 && matchers[0].Name == labels.MetricName && matchers[0].Value == ".*" && matchers[0].Type == labels.MatchRegexp {
+		matchesEverything = true
+	}
+
+	if matchesEverything {
+		var fromLabels []string
+		for _, rule := range rp.GetRules() {
+			if cfg, ok := rule.Labels[name]; ok && cfg.IsDynamic {
+				fromLabels = append(fromLabels, cfg.FromLabels...)
+			}
+		}
+
+		if len(fromLabels) > 0 {
+			uniqueValues := make(map[string]struct{})
+			for _, label := range fromLabels {
+				vals, err := r.LabelValues(ctx, label, nil)
+				if err != nil {
+					return nil, err
+				}
+				for _, v := range vals {
+					uniqueValues[v] = struct{}{}
+				}
+			}
+
+			res := make([]string, 0, len(uniqueValues))
+			for v := range uniqueValues {
+				res = append(res, v)
+			}
+			slices.Sort(res)
+			return res, nil
+		}
+	}
+
 	// It is a dynamic label. We need to iterate matching series.
 	// If no matchers, we match all series.
 	if len(matchers) == 0 {
 		matchers = []*labels.Matcher{labels.MustNewMatcher(labels.MatchRegexp, labels.MetricName, ".*")}
 	}
+
+	// Special case for dynamic labels that are just aliases for other labels.
+	// We can query the source labels directly.
+	// This is an optimization for the common case where we want all values for a dynamic label
+	// without filtering by other labels.
+	// However, if the dynamic label has complex rules (e.g. multiple potential source labels),
+	// or if there are other matchers, we might still need to filter.
+	// For now, let's stick to the generic implementation which is correct but potentially slower.
+	// But wait, if we are just listing values for `namespace_fixed`, we should just list values
+	// for `ns` and `namespace` and union them?
+	// Not quite, because we only include values from series that match the Rule Matchers.
+	// And we need to respect priority.
+	//
+	// Actually, iterating series is safer and correct.
+	// But if there are no matchers (except implicit "all"), we can optimize?
+	// We'd need to find all series matching rule matchers.
 
 	p, err := PostingsForMatchers(ctx, r, matchers...)
 	if err != nil {
@@ -255,6 +311,19 @@ func getDynamicLabelValues(ctx context.Context, r IndexReader, rp dynamic_labels
 
 		dynamicLabels := rp.GetDynamicLabelsForSeries(lbls)
 		val := dynamicLabels.Get(name)
+		// Note: GetDynamicLabelsForSeries returns ONLY the dynamic labels.
+		// If the dynamic label shadows an intrinsic label, it will be in dynamicLabels.
+		// If it's not in dynamicLabels (e.g. rule didn't apply), then it's not a dynamic label for THIS series.
+		// But `name` IS a dynamic label name globally.
+		// Should we fall back to intrinsic?
+		// If a label is defined as dynamic, does it ever fall back to intrinsic?
+		// The current implementation of `GetDynamicLabelsForSeries` only returns labels if the rule matches.
+		// If the rule doesn't match, `dynamicLabels` doesn't contain `name`.
+		// In that case, the series effectively doesn't have this dynamic label (unless it has it intrinsically).
+		// If it has it intrinsically, we should probably return it?
+		// The `EnrichLabels` function merges dynamic on top of intrinsic.
+		// So yes, check dynamic, then intrinsic.
+
 		if val == "" {
 			val = lbls.Get(name)
 		}
@@ -491,34 +560,24 @@ func PostingsForMatchers(ctx context.Context, ix IndexReader, ms ...*labels.Matc
 		// Build a map: dynamic label name -> label value -> list of matcher sets
 		// This allows efficient lookup for query processing for static values
 		dynamicLabelMap := make(map[string]map[string][][]*labels.Matcher)
-		// Build a map: dynamic label name -> list of (template structure, template string, rule matchers)
-		// This allows lookup for template-based labels
-		templateLabelMap := make(map[string][]struct {
-			templateStructure *dynamic_labels.TemplateStructure
-			template          string
-			matchers          [][]*labels.Matcher
+		// Build a map: dynamic label name -> dynamic configuration
+		// This allows lookup for dynamic labels based on other labels
+		dynamicConfigMap := make(map[string]struct {
+			fromLabels []string
+			matchers   [][]*labels.Matcher
 		})
 
 		for _, rule := range rules {
 			for labelName, labelConfig := range rule.Labels {
-				if labelConfig.IsTemplate {
-					// Store template-based label configuration with pre-parsed structure
-					if templateLabelMap[labelName] == nil {
-						templateLabelMap[labelName] = make([]struct {
-							templateStructure *dynamic_labels.TemplateStructure
-							template          string
-							matchers          [][]*labels.Matcher
-						}, 0)
-					}
-					templateLabelMap[labelName] = append(templateLabelMap[labelName], struct {
-						templateStructure *dynamic_labels.TemplateStructure
-						template          string
-						matchers          [][]*labels.Matcher
+				if labelConfig.IsDynamic {
+					// Store dynamic label configuration
+					dynamicConfigMap[labelName] = struct {
+						fromLabels []string
+						matchers   [][]*labels.Matcher
 					}{
-						templateStructure: labelConfig.TemplateStructure,
-						template:          labelConfig.TemplateValue,
-						matchers:          rule.Matchers,
-					})
+						fromLabels: labelConfig.FromLabels,
+						matchers:   rule.Matchers,
+					}
 				} else {
 					// Store static value configuration
 					labelValue := labelConfig.StaticValue
@@ -541,16 +600,31 @@ func PostingsForMatchers(ctx context.Context, ix IndexReader, ms ...*labels.Matc
 
 			var subIts []index.Postings
 
-			// Check if this is a template-based label
-			templates := templateLabelMap[m.Name]
-			if len(templates) > 0 {
-				// Handle template-based label
+			// Check if this is a dynamic label based on other labels
+			if dynConfig, ok := dynamicConfigMap[m.Name]; ok {
+				// Handle dynamic label based on priority list of source labels.
+				// If querying for dynamic_label="value", we need to match series where:
+				// (source_label_1="value") OR
+				// (source_label_1 is missing AND source_label_2="value") OR
+				// (source_label_1 is missing AND source_label_2 is missing AND source_label_3="value") ...
+
 				if m.Matches("") {
-					// For "not" matchers on template labels, we need to handle this differently
-					// Since we can't enumerate all possible template values, we'll need to
-					// process this by checking all series that match the rule matchers
-					// and excluding those where the template evaluates to a matching value
-					// For now, we'll treat this as matching all series (subtract matching ones later)
+					// If matching empty string, we are looking for series where:
+					// 1. Rule does NOT match (implicit) - handled by starting with AllPostings and subtracting positive matches
+					// 2. Rule matches BUT all source labels are missing
+					// 3. Rule matches AND first present source label is empty (same as missing)
+					//
+					// Strategy:
+					// Start with AllPostings (if not already constrained).
+					// Subtract cases where the dynamic label IS set to a non-empty value.
+					// A dynamic label is set if:
+					// Rule matches AND at least one source label is non-empty.
+					//
+					// So we find series where:
+					// (Rule matches AND L1!="") OR
+					// (Rule matches AND L1="" AND L2!="") OR ...
+					// And add these to notIts.
+
 					if len(its) == 0 {
 						k, v := index.AllPostingsKey()
 						allPostings, err := ix.Postings(ctx, k, v)
@@ -559,52 +633,114 @@ func PostingsForMatchers(ctx context.Context, ix IndexReader, ms ...*labels.Matc
 						}
 						its = append(its, allPostings)
 					}
-					// Note: Full implementation would require iterating through series,
-					// which is expensive. This is a limitation of template-based labels with "not" matchers.
-				} else {
-					// Try to reverse-engineer the queried value against each template
-					if m.Type != labels.MatchEqual {
-						// For regexp matchers on template labels, we can't easily reverse-engineer
-						// This is a limitation - we'd need to check all series
-						// For now, skip template-based regexp matching
-						// Other matcher types not supported for templates
-						continue
-					}
-					queriedValue := m.Value
 
-					// Try each template to see if the queried value matches
-					for _, tmpl := range templates {
-						componentValues := dynamic_labels.ReverseEngineerTemplateValue(tmpl.templateStructure, tmpl.template, queriedValue)
-						if componentValues != nil {
-							// Successfully reverse-engineered! Create matchers for component labels
-							for _, matcherSet := range tmpl.matchers {
-								// Create matchers for the component labels
-								componentMatchers := make([]*labels.Matcher, 0, len(matcherSet)+len(componentValues))
-								// Add existing rule matchers
-								componentMatchers = append(componentMatchers, matcherSet...)
-								// Add matchers for component labels
-								for labelName, labelValue := range componentValues {
-									matcher, err := labels.NewMatcher(labels.MatchEqual, labelName, labelValue)
-									if err != nil {
-										return nil, err
+					for i, sourceLabel := range dynConfig.fromLabels {
+						for _, ruleMatcherSet := range dynConfig.matchers {
+							// Build matchers for this priority branch
+							currentBranchMatchers := make([]*labels.Matcher, 0, len(ruleMatcherSet)+i+1)
+							currentBranchMatchers = append(currentBranchMatchers, ruleMatcherSet...)
+
+							// Higher priority labels must be empty
+							validBranch := true
+							for k := 0; k < i; k++ {
+								prevLabel := dynConfig.fromLabels[k]
+								matcher, _ := labels.NewMatcher(labels.MatchEqual, prevLabel, "")
+								currentBranchMatchers = append(currentBranchMatchers, matcher)
+								// Check consistency with rule matchers
+								for _, rm := range ruleMatcherSet {
+									if rm.Name == prevLabel && !rm.Matches("") {
+										validBranch = false
+										break
 									}
-									componentMatchers = append(componentMatchers, matcher)
+								}
+							}
+							if !validBranch {
+								continue
+							}
+
+							// Current label must be NON-empty (because we are finding cases where dynamic label IS set)
+							matcher, _ := labels.NewMatcher(labels.MatchNotEqual, sourceLabel, "")
+							currentBranchMatchers = append(currentBranchMatchers, matcher)
+
+							p, err := PostingsForMatchers(ctx, ix, currentBranchMatchers...)
+							if err != nil {
+								return nil, err
+							}
+							notIts = append(notIts, p)
+						}
+					}
+				} else {
+					// m.Matches("") is false.
+					// We are looking for series where the dynamic label is set to a value matching m.
+					//
+					// Case 1: label1 has matching value
+					// matchers: rule_matchers + {label1=~m}
+					//
+					// Case 2: label1 missing, label2 has matching value
+					// matchers: rule_matchers + {label1=""} + {label2=~m}
+					// ...
+
+					for i, sourceLabel := range dynConfig.fromLabels {
+						for _, ruleMatcherSet := range dynConfig.matchers {
+							currentBranchMatchers := make([]*labels.Matcher, 0, len(ruleMatcherSet)+i+1)
+							currentBranchMatchers = append(currentBranchMatchers, ruleMatcherSet...)
+
+							// Add missing checks for higher priority labels
+							validBranch := true
+							for k := 0; k < i; k++ {
+								prevLabel := dynConfig.fromLabels[k]
+								// Check if rule matchers already force this label to be non-empty
+								for _, rm := range ruleMatcherSet {
+									if rm.Name == prevLabel && !rm.Matches("") {
+										validBranch = false
+										break
+									}
+								}
+								if !validBranch {
+									break
 								}
 
-								// Get postings for these matchers
-								p, err := PostingsForMatchers(ctx, ix, componentMatchers...)
-								if err != nil {
-									return nil, err
-								}
-								subIts = append(subIts, p)
+								// Add matcher {prevLabel=""}
+								matcher, _ := labels.NewMatcher(labels.MatchEqual, prevLabel, "")
+								currentBranchMatchers = append(currentBranchMatchers, matcher)
 							}
+
+							if !validBranch {
+								continue
+							}
+
+							// Add check for current label matching the query
+							var currentMatcher *labels.Matcher
+							var err error
+							switch m.Type {
+							case labels.MatchEqual:
+								currentMatcher, err = labels.NewMatcher(labels.MatchEqual, sourceLabel, m.Value)
+							case labels.MatchNotEqual:
+								currentMatcher, err = labels.NewMatcher(labels.MatchNotEqual, sourceLabel, m.Value)
+							case labels.MatchRegexp:
+								currentMatcher, err = labels.NewMatcher(labels.MatchRegexp, sourceLabel, m.Value)
+							case labels.MatchNotRegexp:
+								currentMatcher, err = labels.NewMatcher(labels.MatchNotRegexp, sourceLabel, m.Value)
+							}
+
+							if err != nil {
+								return nil, err
+							}
+							currentBranchMatchers = append(currentBranchMatchers, currentMatcher)
+
+							// Get postings for this branch
+							p, err := PostingsForMatchers(ctx, ix, currentBranchMatchers...)
+							if err != nil {
+								return nil, err
+							}
+							subIts = append(subIts, p)
 						}
 					}
 
 					if len(subIts) > 0 {
 						its = append(its, index.Merge(ctx, subIts...))
 					} else {
-						// No template matched the queried value
+						// No combinations matched
 						return index.EmptyPostings(), nil
 					}
 				}

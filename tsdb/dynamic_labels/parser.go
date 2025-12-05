@@ -22,8 +22,20 @@ import (
 
 // ParseMatcherString parses a single matcher string (metric selector) into a list of labels.Matcher.
 // The string can contain multiple matchers, e.g., '{version="go1.25.4",instance="localhost:9090"}'.
+// If the string is a bare metric name (no braces), it will be converted to {__name__="metric_name"}.
 func ParseMatcherString(matcherStr string) ([]*labels.Matcher, error) {
-	matchers, err := parser.ParseMetricSelector(matcherStr)
+	// If the string doesn't start with '{', treat it as a bare metric name
+	// and convert it to a proper selector format
+	selectorStr := matcherStr
+	if len(matcherStr) == 0 {
+		return nil, fmt.Errorf("empty matcher string")
+	}
+	if matcherStr[0] != '{' {
+		// It's a bare metric name, wrap it in a selector
+		selectorStr = fmt.Sprintf(`{__name__="%s"}`, matcherStr)
+	}
+
+	matchers, err := parser.ParseMetricSelector(selectorStr)
 	if err != nil {
 		return nil, fmt.Errorf("parse matcher string %q: %w", matcherStr, err)
 	}

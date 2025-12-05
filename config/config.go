@@ -1690,9 +1690,9 @@ func sanitizeAttributes(attributes []string, adjective string) error {
 type DynamicLabelValueConfig struct {
 	// SetValueStatic sets a static value for the label.
 	SetValueStatic *string `yaml:"set_value_static,omitempty"`
-	// SetValueFromLabels sets the value from a template using other label values.
-	// The template can use ${label_name} syntax to reference other labels.
-	SetValueFromLabels *string `yaml:"set_value_from_labels,omitempty"`
+	// SetValueFromLabels sets the value from a list of labels.
+	// The first label that exists in the series will be used.
+	SetValueFromLabels []string `yaml:"set_value_from_labels,omitempty"`
 }
 
 // DynamicLabelRule defines a single rule for dynamic labels.
